@@ -1,0 +1,6 @@
+# Feedhandler runtime dependencies.
+# Install into a venv:  python -m venv .venv && . .venv/bin/activate && pip install -r feedhandler/requirements.txt
+pykx>=4.0        # Python <-> KDB+ IPC bridge
+numpy>=1.26      # column-vector construction for timestamps
+websockets>=12   # async client for exchange WebSocket streams
+certifi>=2024.0  # up-to-date CA bundle for TLS (avoids macOS cert-store gotchas)

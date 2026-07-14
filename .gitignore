@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+logs/*.log
+.DS_Store
+# KDB+ on-disk HDB (added in a later phase)
+hdb/
+# C++ build artifacts
+cpp/build/
+# Vendored GUI libs (fetch via cpp/README setup step)
+cpp/third_party/imgui/
+cpp/third_party/implot/
