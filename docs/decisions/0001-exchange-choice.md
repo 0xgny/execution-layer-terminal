@@ -1,4 +1,4 @@
-# ADR 0001 — Crypto exchange choice for the market-data feed
+# ADR 0001 -- Crypto exchange choice for the market-data feed
 
 **Status:** Accepted (Phase 1)
 **Date:** 2026-07
@@ -17,8 +17,8 @@ because the feedhandler is source-agnostic, switching is a one-class change.
 |---|---|---|
 | Public market-data WS | `wss://stream.binance.com:9443` | `wss://ws-feed.exchange.coinbase.com` |
 | Auth for market data | **None** (simplest) | Mixed; `level2` / Advanced-Trade need JWT |
-| Trade stream → `trade` | `<sym>@trade` | `matches` / `market_trades` |
-| Quote stream → `quote` | `@bookTicker` (best bid/ask) | `ticker` |
+| Trade stream -> `trade` | `<sym>@trade` | `matches` / `market_trades` |
+| Quote stream -> `quote` | `@bookTicker` (best bid/ask) | `ticker` |
 | Depth | L2 diff (`@depth`) | L2 + **L3 order-by-order** (`full`) |
 | Liquidity / tick rate | Highest globally | Lower, still ample for dev |
 | Jurisdiction | **Blocks restricted locations (e.g. US)** | US-regulated, available |
@@ -40,12 +40,12 @@ either can be the live source without downstream changes.
   **Coinbase** (next feedhandler to implement) or **Binance.US**, or run from an
   eligible location.
 - Because of this, Coinbase is likely the first *live* venue for many users even
-  though Binance was implemented first. That's fine — same interface.
+  though Binance was implemented first. That's fine -- same interface.
 
 ## Follow-ups
 
-- ✅ **`CoinbaseFeedHandler` implemented** (`feedhandler/coinbase.py`) using the
-  public `ticker` + `matches` channels — no auth. Verified live end-to-end
+- [x] **`CoinbaseFeedHandler` implemented** (`feedhandler/coinbase.py`) using the
+  public `ticker` + `matches` channels -- no auth. Verified live end-to-end
   (real BTC-USD/ETH-USD ticks into the RDB). It is now the recommended live venue
   for restricted locations. Add JWT auth for `level2`/`full` if L3 depth is wanted.
 - Consider a `--venue all` mode that runs multiple feedhandlers into the same

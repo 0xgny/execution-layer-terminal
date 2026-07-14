@@ -1,4 +1,4 @@
-# Phase 1 — Market-data feedhandler → KDB+
+# Phase 1 -- Market-data feedhandler -> KDB+
 
 This phase proves the end-to-end loop: real (or simulated) crypto ticks land in
 an in-memory KDB+ store and are immediately queryable. Everything else in the
@@ -8,16 +8,16 @@ project builds on this backbone.
 
 | File | Purpose |
 |---|---|
-| `kdb/schema.q` | `trade` / `quote` table definitions — the shared contract |
+| `kdb/schema.q` | `trade` / `quote` table definitions -- the shared contract |
 | `kdb/tp.q` | Tickerplant: pub/sub router on port 5010 |
 | `kdb/rdb.q` | Real-time DB on port 5011; subscribes to the tickerplant |
 | `feedhandler/schema.py` | Normalized `Trade` / `Quote` dataclasses + `Side` enum |
 | `feedhandler/config.py` | Env-driven config (symbols, ports, flush, TLS) |
-| `feedhandler/publisher.py` | PyKX bridge: batches → typed vectors → `.u.upd` |
+| `feedhandler/publisher.py` | PyKX bridge: batches -> typed vectors -> `.u.upd` |
 | `feedhandler/base.py` | Buffering, flush loop, lifecycle (abstract base) |
 | `feedhandler/binance.py` | Binance WebSocket implementation |
 | `feedhandler/mock.py` | Synthetic feed (no network) |
-| `feedhandler/__main__.py` | CLI: `python -m feedhandler --venue …` |
+| `feedhandler/__main__.py` | CLI: `python -m feedhandler --venue ...` |
 | `feedhandler/test_binance_parsing.py` | Deterministic wire-format tests |
 | `scripts/run_stack.sh` | Launch tp + rdb + feedhandler together |
 
@@ -43,12 +43,12 @@ Coinbase later is: write `CoinbaseFeedHandler(BaseFeedHandler)`, register it in
 (`TimestampVector`, `SymbolVector`, `FloatVector`, `CharVector`) that line up 1:1
 with `kdb/schema.q`, then calls `.u.upd[table; data]` on the tickerplant. Column
 vectors (not row-by-row inserts) because KDB+ is columnar and IPC has per-message
-overhead — one call with N rows beats N calls. Sends are one-way (`wait=False`),
+overhead -- one call with N rows beats N calls. Sends are one-way (`wait=False`),
 so the feedhandler never blocks on the tickerplant.
 
 ### The q side
 
-- `tp.q` keeps a `subscribers` dict (table → handles). `.u.upd` async-forwards each
+- `tp.q` keeps a `subscribers` dict (table -> handles). `.u.upd` async-forwards each
   update to subscribers; `.u.sub` registers them; `.z.pc` drops dead handles.
 - `rdb.q` subscribes to `trade` and `quote`, and its `.u.upd` simply appends the
   incoming column vectors into the local tables. A `counts[]` helper reports row
@@ -58,12 +58,12 @@ so the feedhandler never blocks on the tickerplant.
 
 1. **Schema loads** and both tables have the right column types
    (`meta trade` / `meta quote`).
-2. **Mock pipeline end-to-end**: ran `tp.q` + `rdb.q` + the mock feed for ~5 s →
+2. **Mock pipeline end-to-end**: ran `tp.q` + `rdb.q` + the mock feed for ~5 s ->
    RDB held **200 trades + 200 quotes** with correct 2026 nanosecond timestamps;
    a pushed-down VWAP query returned sensible per-symbol results.
-3. **Binance parsing**: `test_binance_parsing.py` passes — trade price/size, the
-   buyer/seller **aggressor** logic (the `m` flag), event-time ms→ns conversion,
-   and `bookTicker → quote` mapping.
+3. **Binance parsing**: `test_binance_parsing.py` passes -- trade price/size, the
+   buyer/seller **aggressor** logic (the `m` flag), event-time ms->ns conversion,
+   and `bookTicker -> quote` mapping.
 4. **Binance live connect**: connects and reconnects cleanly; this location is
    geo-blocked (HTTP 451), demonstrating the jurisdiction caveat first-hand.
 
@@ -73,7 +73,7 @@ These are worth recording because they'll bite anyone extending the project:
 
 1. **Solitary `/` lines start a q block comment.** The original doc comment blocks
    used blank `/` separator lines. In q, a line that is *just* `/` opens a
-   multi-line comment that runs until a solitary `\` — which silently swallowed
+   multi-line comment that runs until a solitary `\` -- which silently swallowed
    the table definitions, so no tables were created. Fixed by never using a
    solitary `/` (use `/ .` or text).
 2. **PyKX embedded q is not thread-safe.** The first design flushed via
@@ -103,5 +103,5 @@ q -c "1000 1000" 2>/dev/null <<< 'h:hopen`::5011; h"counts[]"'
 Port the Stock-Analysis-Engine metrics to run on rolling windows pulled from the
 RDB, and publish results into a KDB+ `signal` table for the execution layer to
 consume. Split cheap/continuous (in q) from expensive/periodic (in Python) per
-[`architecture.md` §4](architecture.md).
+[`architecture.md` Sec. 4](architecture.md).
 ```

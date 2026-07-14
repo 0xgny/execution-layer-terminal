@@ -24,7 +24,7 @@ def _make_handler() -> CoinbaseFeedHandler:
 
 
 def test_iso_to_ns() -> None:
-    # 2014-11-07T08:19:27.028459Z -> known unix seconds 1415348367, + 28459 µs
+    # 2014-11-07T08:19:27.028459Z -> known unix seconds 1415348367, + 28459 us
     ns = _iso_to_ns("2014-11-07T08:19:27.028459Z")
     assert ns == 1_415_348_367_028_459_000, ns
     print("ok: ISO-8601 -> unix ns")

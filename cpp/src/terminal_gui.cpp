@@ -12,7 +12,9 @@
 // pure presentation: it reads an EngineView snapshot each frame and posts
 // Commands. See engine.hpp for the threading model.
 // ============================================================================
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -51,6 +53,23 @@ const ImVec4 kCyan    = ImVec4(0.20f, 0.75f, 0.85f, 1.00f);
 
 ImVec4 pnl_color(double v) { return v >= 0 ? kGreen : kRed; }
 
+// Format a number with thousands separators, e.g. 62558.87 -> "62,558.87".
+std::string commafy(double v, int dec = 2) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.*f", dec, v);
+    std::string s = buf;
+    std::size_t dot = s.find('.');
+    int end = (dot == std::string::npos) ? (int)s.size() : (int)dot;
+    int start = (!s.empty() && s[0] == '-') ? 1 : 0;
+    for (int i = end - 3; i > start; i -= 3) s.insert((std::size_t)i, ",");
+    return s;
+}
+
+// Same, but with an explicit leading '+' for non-negative values (for PnL).
+std::string signed_money(double v, int dec = 2) {
+    return (v >= 0 ? "+" : "") + commafy(v, dec);
+}
+
 void apply_theme() {
     ImGuiStyle& s = ImGui::GetStyle();
     s.WindowRounding = 0.0f;
@@ -78,28 +97,35 @@ void build_default_layout(ImGuiID dockspace_id) {
     ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->WorkSize);
 
-    ImGuiID right, bottom, left = dockspace_id;
-    right = ImGui::DockBuilderSplitNode(left, ImGuiDir_Right, 0.30f, nullptr, &left);
-    bottom = ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.32f, nullptr, &left);
+    // Layout: [ left: watch/search ] [ center: price chart / pnl ] [ right: ticket / positions / log ]
+    ImGuiID center = dockspace_id, right, left, center_bottom, right_bottom;
+    right = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, nullptr, &center);
+    left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.24f, nullptr, &center);
+    center_bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.38f, nullptr, &center);
+    right_bottom = ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.55f, nullptr, &right);
 
     ImGui::DockBuilderDockWindow("Market Watch", left);
-    ImGui::DockBuilderDockWindow("Positions", bottom);
+    ImGui::DockBuilderDockWindow("Ticker Search", left);
+    ImGui::DockBuilderDockWindow("Price Chart", center);
+    ImGui::DockBuilderDockWindow("PnL", center_bottom);
     ImGui::DockBuilderDockWindow("Order Ticket", right);
-    ImGui::DockBuilderDockWindow("Event Log", right);
+    ImGui::DockBuilderDockWindow("Positions", right_bottom);
+    ImGui::DockBuilderDockWindow("Event Log", right_bottom);
     ImGui::DockBuilderFinish(dockspace_id);
 }
 
 void money_text(const char* label, double v, ImVec4 col) {
     ImGui::TextColored(kCyan, "%s", label);
     ImGui::SameLine();
-    ImGui::TextColored(col, "%s%.2f", v >= 0 ? " " : "", v);
+    ImGui::TextColored(col, "%s", commafy(v).c_str());
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::string host = argc > 1 ? argv[1] : "127.0.0.1";
-    const int port = argc > 2 ? std::atoi(argv[2]) : 5011;
+    const int port = argc > 2 ? std::atoi(argv[2]) : 5011;       // RDB
+    const int tp_port = argc > 3 ? std::atoi(argv[3]) : 5010;    // tickerplant
 
     if (!glfwInit()) { std::fprintf(stderr, "glfwInit failed\n"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -152,7 +178,7 @@ int main(int argc, char** argv) {
                 lim.max_order_qty = 100.0;
                 lim.max_position_qty = 1e6;
                 lim.max_order_notional = capital_input;  // no single order beyond funded capital
-                engine = new TradingEngine(host, port, {"BTC-USD", "ETH-USD"}, capital_input, lim);
+                engine = new TradingEngine(host, port, tp_port, {"BTC-USD", "ETH-USD"}, capital_input, lim);
                 engine->start();
                 started = true;
             }
@@ -214,12 +240,17 @@ int main(int argc, char** argv) {
                 ImGui::TableHeadersRow();
                 for (const auto& s : v.symbols) {
                     ImGui::TableNextRow();
-                    ImGui::TableNextColumn(); ImGui::TextColored(kAmber, "%s", s.symbol.c_str());
+                    ImGui::TableNextColumn();
+                    ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+                    if (ImGui::Selectable(s.symbol.c_str(), s.symbol == v.focus,
+                                          ImGuiSelectableFlags_SpanAllColumns))
+                        engine->post({Command::SetFocus, s.symbol, 0, false});
+                    ImGui::PopStyleColor();
                     if (s.has_quote) {
-                        ImGui::TableNextColumn(); ImGui::TextColored(kGreen, "%.2f", s.bid);
-                        ImGui::TableNextColumn(); ImGui::TextColored(kRed, "%.2f", s.ask);
-                        ImGui::TableNextColumn(); ImGui::Text("%.2f", s.mid);
-                        ImGui::TableNextColumn(); ImGui::Text("%.2f", s.ask - s.bid);
+                        ImGui::TableNextColumn(); ImGui::TextColored(kGreen, "%s", commafy(s.bid).c_str());
+                        ImGui::TableNextColumn(); ImGui::TextColored(kRed, "%s", commafy(s.ask).c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.mid).c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.ask - s.bid).c_str());
                     } else {
                         ImGui::TableNextColumn(); ImGui::TextDisabled("...");
                         ImGui::TableNextColumn(); ImGui::TextDisabled("...");
@@ -276,9 +307,9 @@ int main(int argc, char** argv) {
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn(); ImGui::TextColored(kAmber, "%s", s.symbol.c_str());
                     ImGui::TableNextColumn(); ImGui::Text("%.6f", s.net_qty);
-                    ImGui::TableNextColumn(); ImGui::Text("%.2f", s.avg_price);
-                    ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(s.unrealized), "%+.2f", s.unrealized);
-                    ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(s.realized), "%+.2f", s.realized);
+                    ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.avg_price).c_str());
+                    ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(s.unrealized), "%s", signed_money(s.unrealized).c_str());
+                    ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(s.realized), "%s", signed_money(s.realized).c_str());
                     ImGui::TableNextColumn();
                     if (s.net_qty != 0.0) {
                         ImGui::PushID(s.symbol.c_str());
@@ -294,6 +325,90 @@ int main(int argc, char** argv) {
             ImGui::Begin("Event Log");
             for (auto it = v.log.rbegin(); it != v.log.rend(); ++it)
                 ImGui::TextWrapped("%s", it->c_str());
+            ImGui::End();
+
+            // --- Ticker Search (browse/search the full product catalog) ---------
+            ImGui::Begin("Ticker Search");
+            static char filter[32] = "";
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##filter", "search ticker (e.g. SOL)...", filter, sizeof(filter));
+            for (char* p = filter; *p; ++p) *p = (char)toupper(*p);
+            ImGui::TextDisabled("%zu products", v.products.size());
+            ImGui::BeginChild("catalog", ImVec2(0, 0), false);
+            int shown = 0;
+            for (const auto& id : v.products) {
+                if (filter[0] && id.find(filter) == std::string::npos) continue;
+                if (++shown > 500) break;  // keep the list responsive
+                if (ImGui::Selectable(id.c_str()))
+                    engine->post({Command::AddSymbol, id, 0, false});
+            }
+            ImGui::EndChild();
+            ImGui::End();
+
+            // --- Price Chart (focused symbol) -----------------------------------
+            ImGui::Begin("Price Chart");
+            ImGui::TextColored(kAmber, "%s", v.focus.empty() ? "(select a symbol)" : v.focus.c_str());
+            if (v.price_history.size() >= 2) {
+                if (ImPlot::BeginPlot("##px", ImVec2(-1, -1), ImPlotFlags_NoLegend | ImPlotFlags_NoMouseText)) {
+                    // Fit X to the data, but give Y ~15% headroom top and bottom so
+                    // the line never hugs the window edges.
+                    double lo = *std::min_element(v.price_history.begin(), v.price_history.end());
+                    double hi = *std::max_element(v.price_history.begin(), v.price_history.end());
+                    double pad = (hi - lo) * 0.15;
+                    if (pad <= 0) pad = std::abs(hi) * 0.001 + 1e-6;
+                    ImPlot::SetupAxes("ticks", "price", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_None);
+                    ImPlot::SetupAxisLimits(ImAxis_Y1, lo - pad, hi + pad, ImPlotCond_Always);
+                    ImPlotSpec spec;
+                    spec.LineColor = kAmber;
+                    spec.LineWeight = 1.6f;
+                    ImPlot::PlotLine(v.focus.c_str(), v.price_history.data(),
+                                     (int)v.price_history.size(), 1.0, 0.0, spec);
+                    ImPlot::EndPlot();
+                }
+            } else {
+                ImGui::TextDisabled("waiting for trades...");
+            }
+            ImGui::End();
+
+            // --- PnL chart ------------------------------------------------------
+            ImGui::Begin("PnL");
+            if (v.pnl_history.size() >= 2) {
+                if (ImPlot::BeginPlot("##pnl", ImVec2(-1, -1), ImPlotFlags_NoLegend | ImPlotFlags_NoMouseText)) {
+                    const int n = (int)v.pnl_history.size();
+                    // Symmetric Y limits so the zero line stays in the middle (the
+                    // direction of profit/loss is always visible) with headroom on top.
+                    double m = 0.0;
+                    for (double y : v.pnl_history) m = std::max(m, std::abs(y));
+                    double top = m * 1.25;
+                    if (top < 1.0) top = 1.0;
+                    ImPlot::SetupAxes("t", "$", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_None);
+                    ImPlot::SetupAxisLimits(ImAxis_Y1, -top, top, ImPlotCond_Always);
+
+                    // zero reference line
+                    double zx[2] = {0.0, (double)(n - 1)};
+                    double zy[2] = {0.0, 0.0};
+                    ImPlotSpec zs; zs.LineColor = kAmberDim; zs.LineWeight = 1.0f;
+                    ImPlot::PlotLine("##zero", zx, zy, 2, zs);
+
+                    // Split the series into profit (green) / loss (red) via NaN masking.
+                    static std::vector<double> up, down;
+                    up.assign(n, NAN);
+                    down.assign(n, NAN);
+                    for (int i = 0; i < n; ++i) {
+                        double y = v.pnl_history[i];
+                        if (y >= 0) up[i] = y;
+                        if (y <= 0) down[i] = y;  // boundary in both so segments join at zero
+                    }
+                    ImPlotSpec gs; gs.LineColor = kGreen; gs.LineWeight = 1.6f;
+                    ImPlotSpec rs; rs.LineColor = kRed;   rs.LineWeight = 1.6f;
+                    ImPlot::PlotLine("profit", up.data(), n, 1.0, 0.0, gs);
+                    ImPlot::PlotLine("loss", down.data(), n, 1.0, 0.0, rs);
+                    ImPlot::EndPlot();
+                }
+                ImGui::TextColored(pnl_color(v.total_pnl), "  now: %s", signed_money(v.total_pnl).c_str());
+            } else {
+                ImGui::TextDisabled("accumulating...");
+            }
             ImGui::End();
         }
 

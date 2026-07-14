@@ -257,6 +257,8 @@ std::vector<double> KdbClient::query_floats(const std::string& expr) {
 
 std::vector<std::string> KdbClient::products() { return query_symbols("products"); }
 
+std::vector<std::string> KdbClient::universe() { return query_symbols("universe"); }
+
 std::vector<double> KdbClient::history(const std::string& symbol, int n) {
     return query_floats("hist[`$\"" + symbol + "\";" + std::to_string(n) + "]");
 }

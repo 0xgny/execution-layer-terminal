@@ -85,6 +85,14 @@ class TickerplantPublisher:
         except Exception:  # pragma: no cover
             pass
 
+    def set_universe(self, ids: list[str]) -> None:
+        """Publish the set of symbols the feed is actually streaming, so the
+        terminal can auto-populate its watch list at boot."""
+        try:
+            self.conn(".u.setuniverse", kx.SymbolVector(ids), wait=False)
+        except Exception:  # pragma: no cover
+            pass
+
     def close(self) -> None:
         try:
             self.conn.close()

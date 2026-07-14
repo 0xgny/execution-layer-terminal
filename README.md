@@ -1,182 +1,206 @@
 # Execution Layer
 
-A real-time crypto trading platform that fuses two prior projects:
+A real-time crypto paper-trading terminal. It streams live market data from
+Coinbase into a KDB+ tick store, and a C++ "Bloomberg-style" terminal reads that
+data over IPC to let you trade a simulated account with real-time PnL, live price
+and PnL charts, and an order blotter.
 
-- **[q-sim](https://github.com/0xgny/q-sim)** — a KDB+/PyKX real-time tick pipeline (the *streaming* half)
-- **[Stock-Analysis-Engine](https://github.com/0xgny/Stock-Analysis-Engine)** — statistical + ML market analysis (the *research* half)
+It fuses two earlier projects:
 
-The goal is an end-to-end loop: **stream live market data → analyze it on the fly → act on it** through an execution layer where users express strategies and trade signals. The execution engine is planned in **C++** with a Bloomberg-terminal-style GUI.
+- q-sim: a KDB+/PyKX real-time tick pipeline (the streaming half)
+- Stock-Analysis-Engine: statistical / ML market analysis (the research half)
 
-> **Status:** Live end-to-end. Coinbase/Binance market data → KDB+ → a native C++
-> client → a threaded paper-trading engine → a **Bloomberg-style docked GUI**
-> (Dear ImGui) with real-time PnL, order tickets, positions, and a kill switch.
-> Trading logic verified against live Coinbase quotes. See [Roadmap](#roadmap).
-
----
-
-## The big picture
-
-```
-┌─────────────┐  WebSocket   ┌──────────────┐  IPC   ┌────────────┐
-│ Crypto exch │ ───────────▶ │ Feedhandler  │ ─────▶ │Tickerplant │  (pub/sub router)
-│ (Binance…)  │ trades/quotes│ (Python)     │ .u.upd │  tp.q      │
-└─────────────┘              └──────────────┘        └─────┬──────┘
-                                                           │ publishes
-                                                  ┌────────┴────────┐
-                                                  ▼                 ▼
-                                             ┌─────────┐      ┌──────────┐
-                                             │  RDB    │      │  HDB     │ (planned)
-                                             │ in-mem  │      │ on-disk  │
-                                             │ rdb.q   │      │ history  │
-                                             └────┬────┘      └──────────┘
-                                                  │ PyKX / C API
-                              ┌───────────────────┴───────────────────┐
-                              ▼                                        ▼
-                     ┌─────────────────┐                  ┌────────────────────────┐
-                     │ Analysis Engine │  signals         │ Execution Layer (C++)  │
-                     │ (Python/ML)     │ ───────────────▶ │ OMS + risk + matching  │
-                     └─────────────────┘                  │ ImGui Bloomberg GUI    │
-                                                          └────────────────────────┘
-```
-
-The KDB+ tickerplant/RDB is the shared low-latency backbone. Python does research;
-C++ does execution; both speak to KDB+ over its native IPC. Swapping the data
-**source** (exchange) is isolated to one feedhandler class — everything downstream
-is unaffected. See [`docs/architecture.md`](docs/architecture.md).
+Everything is paper trading. No real orders are ever routed.
 
 ---
 
-## What's here now
+## Architecture
 
 ```
-execution-layer/
-├── kdb/                       # KDB+ tick infrastructure (q)
-│   ├── schema.q               # trade / quote table definitions (the shared contract)
-│   ├── tp.q                   # tickerplant: pub/sub router (port 5010)
-│   └── rdb.q                  # real-time DB: in-memory store + queries (port 5011)
-├── feedhandler/               # Python market-data feedhandler
-│   ├── schema.py              # normalized Trade / Quote dataclasses
-│   ├── config.py              # env-driven configuration
-│   ├── publisher.py           # PyKX bridge: batches -> .u.upd on the tickerplant
-│   ├── base.py                # buffering + flush loop + TLS + lifecycle (abstract)
-│   ├── binance.py             # Binance WebSocket implementation
-│   ├── coinbase.py            # Coinbase WebSocket implementation
-│   ├── mock.py                # synthetic feed (no network) for offline testing
-│   ├── __main__.py            # CLI entrypoint (--venue binance|coinbase|mock)
-│   └── test_*_parsing.py      # deterministic wire-format tests (binance, coinbase)
-├── cpp/                       # C++ execution core (paper OMS + risk + matching)
-│   ├── include/execution/     # types, risk, oms, matching, strategy, market_data
-│   ├── src/                   # implementations + main.cpp (Bloomberg-style blotter)
-│   ├── Makefile / CMakeLists.txt
-│   └── README.md              # execution-layer design + roadmap
-├── scripts/run_stack.sh       # launch tp + rdb + feedhandler together
-└── docs/                      # design docs & decision records
+  Coinbase WebSocket
+         |
+         v
+  Feedhandler (Python)            normalizes trades/quotes, publishes over IPC
+         |
+         v
+  Tickerplant  tp.q  :5010        pub/sub router + control plane (add-symbol,
+         |                        product catalog, streaming universe)
+         v
+  Real-time DB  rdb.q  :5011      in-memory tick store + last-value caches;
+         |                        answers snap[] / hist[] queries
+         |  (q IPC over a plain socket)
+         v
+  C++ terminal
+    KdbClient  ->  TradingEngine (background thread)  ->  ImGui/ImPlot GUI
+                   OMS + risk gate + paper matching + portfolio/PnL
 ```
+
+The KDB+ tickerplant/RDB is the shared low-latency backbone. Python does
+ingestion; C++ does execution and the UI; both speak to KDB+ over IPC. Swapping
+the data source (exchange) is isolated to one feedhandler class.
+
+For a complete, detailed walkthrough of the architecture, frameworks, the q IPC
+protocol, the threading model, and traced end-to-end workflows, see `design.md`.
+`docs/architecture.md` covers the higher-level design and roadmap.
 
 ---
 
-## Quickstart
+## Prerequisites
 
-**Prerequisites:** KDB+ (`q`) with a license (community `kc.lic` is fine), and Python 3.11.
+- macOS (Apple Silicon supported) or Linux
+- KDB+ / q with a license (the free `kc.lic` community license is fine)
+- Python 3.11 (PyKX does not yet support 3.14 cleanly - see Gotchas)
+- A C++20 compiler (Apple clang works)
+- For the GUI: GLFW, plus the vendored Dear ImGui and ImPlot (fetched below)
+
+---
+
+## How to run
+
+The system runs as two processes: the data stack (one command) and the terminal.
+
+### 1. One-time setup
 
 ```bash
 cd execution-layer
 
-# 1. Python environment (3.11 — see the note below on 3.14)
+# Python environment for the feedhandler
 python3.11 -m venv .venv
 . .venv/bin/activate
 pip install -r feedhandler/requirements.txt
 
-# 2. Make sure q can find its home + license
-export QHOME="$HOME/.kx/q" QLIC="$HOME/.kx"   # adjust to your install
+# GUI dependencies
+brew install glfw
+cd cpp/third_party
+git clone --depth 1 --branch docking https://github.com/ocornut/imgui.git
+git clone --depth 1 https://github.com/epezent/implot.git
+cd ../..
 
-# 3a. One-shot: bring up the whole stack with the offline mock feed
-scripts/run_stack.sh mock BTCUSDT,ETHUSDT
+# Tell q where its home + license live (adjust to your install)
+export QHOME="$HOME/.kx/q"
+export QLIC="$HOME/.kx"
+```
 
-# 3b. …or with the live Coinbase feed (works from most locations)
+### 2. Start the data stack (terminal 1)
+
+```bash
+cd execution-layer
+export QHOME="$HOME/.kx/q" QLIC="$HOME/.kx"
+scripts/run_stack.sh coinbase
+```
+
+This launches the tickerplant, the RDB, and the Coinbase feedhandler. With no
+symbol argument it boots the top-crypto universe (~95 live USD products), so the
+terminal is populated out of the box. To stream a specific set instead:
+
+```bash
 scripts/run_stack.sh coinbase BTC-USD,ETH-USD
-
-# 3c. …or the live Binance feed (where not geo-blocked — see below)
-scripts/run_stack.sh binance BTCUSDT,ETHUSDT
 ```
 
-Then, from another shell, query the live in-memory data:
+Wait until you see `[coinbase] connected + subscribed to N products`.
+
+### 3. Build and run the terminal (terminal 2)
 
 ```bash
-q   # or: $HOME/.kx/bin/q
-q) h:hopen `::5011
-q) h "counts[]"                                             / row counts + latency
-q) h "select vwap:size wavg price, vol:sum size by sym from trade"
+cd execution-layer/cpp
+make gui
+./build/terminal
 ```
 
-### Running the pieces by hand
+The terminal is a plain socket client and does NOT need QHOME/QLIC. Optional
+arguments: `./build/terminal <rdb-host> <rdb-port>` (default `127.0.0.1 5011`).
+
+### 4. Trade
+
+1. Enter your initial capital and click START DESK.
+2. Market Watch fills with the live universe. Click any row to chart it.
+3. In the Order Ticket, pick a symbol, enter a dollar amount, and BUY / SELL.
+4. Watch the price chart and the PnL chart (green in profit, red in loss).
+5. Close a position with FLATTEN (in the ticket or per-row in Positions).
+
+To stop: Ctrl-C in terminal 1 (it tears down the q processes).
+
+---
+
+## Running without a GUI / display
+
+The trading logic can be exercised headlessly against the live RDB:
 
 ```bash
-q kdb/tp.q     # terminal 1 — tickerplant on 5010
-q kdb/rdb.q    # terminal 2 — RDB on 5011, subscribes to the tickerplant
-python -m feedhandler --venue mock --symbols BTCUSDT,ETHUSDT   # terminal 3
+cd execution-layer/cpp
+make run-selftest    # single-threaded: fund, buy live, watch PnL, flatten
+make engine-test     # exercises the threaded engine + command/view handoff
 ```
 
 ---
 
-## Verified
+## Project layout
 
-Tested end-to-end on this machine:
-
-- **Coinbase live → tickerplant → RDB → query**: real market data flows — e.g.
-  BTC-USD ≈ \$62k, ETH-USD ≈ \$1.77k, ~12 ms ingestion latency, with live
-  VWAP and buy/sell order-flow imbalance computed by pushed-down q queries.
-- **Mock feed → tickerplant → RDB → query**: 200 trades + 200 quotes, correct
-  nanosecond timestamps, pushed-down VWAP (offline, no network).
-- **Parsing tests** (`test_binance_parsing.py`, `test_coinbase_parsing.py`) pass:
-  aggressor-side logic (incl. Coinbase's maker→aggressor inversion), price/size,
-  timestamp conversion, and top-of-book → `quote` mapping.
-- **C++ execution core** (`cpp/`) builds clean (C++20, no warnings) and runs the
-  full paper pipeline: MA-cross signals → risk gate → paper fills → position/PnL,
-  with a Bloomberg-style blotter; the risk demo shows an oversized order rejected
-  and the kill switch halting trading.
-- **Binance live**: connects/reconnects correctly, but this location is
-  **geo-blocked by Binance.com** (HTTP 451) — the jurisdiction caveat in
-  [`docs/decisions/0001-exchange-choice.md`](docs/decisions/0001-exchange-choice.md).
-  Use Coinbase here.
+```
+execution-layer/
+  kdb/                     KDB+ tick infrastructure (q)
+    schema.q               trade / quote table definitions (the shared contract)
+    tp.q                   tickerplant: pub/sub router + control plane (:5010)
+    rdb.q                  real-time DB: tick store + last-value caches (:5011)
+  feedhandler/             Python market-data feedhandler
+    schema.py              normalized Trade / Quote types
+    base.py                buffering, flush loop, TLS, control loop (abstract)
+    coinbase.py            Coinbase WebSocket + catalog + dynamic subscribe
+    binance.py             Binance WebSocket implementation
+    mock.py                synthetic feed (no network) for offline testing
+    publisher.py           PyKX bridge: batches -> .u.upd on the tickerplant
+    universe.py            default top-crypto universe subscribed at boot
+    __main__.py            CLI entrypoint (--venue coinbase|binance|mock)
+  cpp/                     C++ execution terminal
+    include/execution/     types, portfolio, risk, oms, matching, kdb_client, engine
+    src/                   implementations + terminal_gui.cpp + headless tests
+    Makefile               build (make gui / make all)
+    README.md              terminal design + build detail
+  scripts/run_stack.sh     launch tp + rdb + feedhandler together
+  docs/                    design docs and decision records
+```
 
 ---
 
-## Known environment gotchas
+## What is verified
 
-- **Use Python 3.11, not 3.14.** PyKX 4.0 + numpy on Python 3.14 raises
-  `decref_numpy_allocated_data` deallocator errors (cosmetic) and, if you ever
-  publish from a worker thread, can SIGSEGV. Python 3.11 is clean.
-- **PyKX embedded q is not thread-safe.** Always publish from the main/event-loop
-  thread. The feedhandler is written this way on purpose.
-- **q needs `QHOME` + `QLIC`.** If you see `license error: no license loaded`,
-  point `QLIC` at the directory containing your `kc.lic`.
-- **TLS behind a corporate/intercepting proxy:** if you get
-  `CERTIFICATE_VERIFY_FAILED`, the feedhandler uses `certifi` by default; for
-  local debugging only you can set `EL_INSECURE_SSL=1` (never for order routing).
-- **Binance HTTP 451:** you're in a restricted location. Use Coinbase (planned)
-  or Binance.US, or run from an eligible location.
+Tested end to end on Apple Silicon:
+
+- Coinbase live -> tickerplant -> RDB -> C++ client: real quotes for ~95 symbols.
+- Buying/selling on live prices with correct cash, position, and PnL accounting;
+  self-test showed PnL tracking the market in real time, then flattening cleanly.
+- Control plane: requesting a new ticker at runtime dynamically subscribes the
+  feed and it starts streaming, no restart.
+- snap[] latency ~0.085 ms for 95 symbols (via the RDB last-value caches).
+- Parsing unit tests for Binance and Coinbase wire formats.
+
+---
+
+## Known gotchas
+
+- Use Python 3.11, not 3.14. PyKX 4.0 on 3.14 raises numpy deallocator errors and
+  can crash if you publish from a worker thread. 3.11 is clean.
+- PyKX embedded q is not thread-safe: the feedhandler only publishes from its main
+  thread on purpose.
+- q needs QHOME and QLIC. If you see "license error: no license loaded", point
+  QLIC at the directory containing your kc.lic.
+- TLS behind an intercepting proxy: if the feed gets CERTIFICATE_VERIFY_FAILED,
+  the feedhandler uses certifi by default; for local debugging only you can set
+  EL_INSECURE_SSL=1 (never for order routing).
+- Binance is geo-blocked in some regions (HTTP 451). Use Coinbase there.
 
 ---
 
 ## Roadmap
 
-1. **✅ Feedhandler → KDB+**: live crypto ticks (Binance + Coinbase) into the tickerplant/RDB.
-2. **✅ C++ execution core**: OMS state machine, paper matching engine, and risk
-   controls (limits + kill switch). *(paper only)*
-3. **✅ Native KDB+ client + threaded engine**: C++ pulls live quotes from the RDB
-   over a pure-socket q IPC client; `TradingEngine` runs the desk on a background thread.
-4. **✅ Bloomberg-style docked GUI** (Dear ImGui + ImPlot): fund capital on launch,
-   account bar, market watch (+ add any ticker), order ticket, positions, kill switch.
-5. **Control plane**: auto-subscribe the feedhandler when the GUI watches a new
-   ticker (today the feed must already carry that symbol — see `cpp/README.md`).
-6. **ImPlot charts** per symbol + per-ticker detail windows.
-7. **Analysis Engine → `signal` table**: Stock-Analysis-Engine metrics on rolling
-   windows from the RDB, published into KDB+; the engine consumes them.
-8. **HDB + end-of-day flush**: persist intraday ticks to a partitioned on-disk HDB.
-9. **Stocks** via a polled Yahoo feed (`exch=yahoo`) into the same pipeline.
-10. **(Optional) live order routing** to exchange testnets, behind the risk gate.
+Done: live feedhandler (Binance + Coinbase); tickerplant/RDB with caches; native
+C++ KDB+ client; threaded engine with paper OMS, risk gate, and matching; docked
+Bloomberg-style GUI with account bar, market watch, ticker search, order ticket,
+positions, event log, and live price + PnL charts; runtime control plane to add
+any ticker; top-crypto boot universe.
 
-See [`docs/architecture.md`](docs/architecture.md) for the full design and
-[`docs/phase-1-feedhandler.md`](docs/phase-1-feedhandler.md) for this phase in detail.
+Next: candlestick / OHLC charts with historical backfill; an Analysis Engine that
+publishes signals into a KDB+ `signal` table for the engine to consume; end-of-day
+persistence to an on-disk HDB; a polled stock feed (e.g. Yahoo); optional live
+order routing to an exchange testnet behind the risk gate.
 ```

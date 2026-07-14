@@ -9,7 +9,7 @@ Responsibilities that live here (so subclasses don't repeat them):
 A concrete subclass only implements :meth:`_run`, whose job is to read from its
 exchange and call :meth:`emit_trade` / :meth:`emit_quote` with normalized ticks.
 This is the abstraction that lets us add Coinbase later as a sibling class
-without touching anything downstream — see docs/decisions/0001-exchange-choice.md
+without touching anything downstream -- see docs/decisions/0001-exchange-choice.md
 """
 
 from __future__ import annotations
@@ -60,14 +60,14 @@ class BaseFeedHandler(abc.ABC):
 
         Uses certifi's CA bundle so we don't depend on the OS/Python cert store
         being provisioned (a common macOS gotcha). ``EL_INSECURE_SSL=1`` disables
-        verification — DEBUG ONLY, to get past a TLS-intercepting proxy; never for
+        verification -- DEBUG ONLY, to get past a TLS-intercepting proxy; never for
         anything carrying credentials or routing real orders.
         """
         import ssl
 
         if self.config.insecure_ssl:
             print(f"[{self.exchange_name}] WARNING: TLS verification DISABLED "
-                  "(EL_INSECURE_SSL=1) — debug only, never for real order routing")
+                  "(EL_INSECURE_SSL=1) -- debug only, never for real order routing")
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
@@ -94,7 +94,7 @@ class BaseFeedHandler(abc.ABC):
             # Flush on THIS (event-loop / main) thread. PyKX's embedded q is not
             # thread-safe, so we must never publish from a worker thread. Sends
             # are fire-and-forget (wait=False in the publisher), so the blocking
-            # time here is just serialize-and-write — negligible at these rates.
+            # time here is just serialize-and-write -- negligible at these rates.
             self._flush()
 
     async def _stats_loop(self) -> None:

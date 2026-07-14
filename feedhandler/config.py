@@ -2,7 +2,7 @@
 
 Values come from environment variables (with sensible defaults) so the same
 code runs locally, in a container, or under a process manager without edits.
-Nothing here is secret today — the crypto market-data streams are public — but
+Nothing here is secret today -- the crypto market-data streams are public -- but
 keeping config in one typed place makes it easy to add API keys later (e.g. for
 Coinbase's authenticated channels or for order routing).
 """

@@ -4,8 +4,8 @@ Purpose: prove the entire pipeline (feedhandler -> tickerplant -> RDB -> query)
 end to end without touching the internet or an exchange. It generates a plausible
 random walk per symbol so downstream analytics have realistic-looking data.
 
-It is a first-class sibling of :class:`BinanceFeedHandler` — the exact same
-:class:`BaseFeedHandler` contract — which is precisely the point of the
+It is a first-class sibling of :class:`BinanceFeedHandler` -- the exact same
+:class:`BaseFeedHandler` contract -- which is precisely the point of the
 abstraction: swapping the venue is swapping this one class.
 """
 

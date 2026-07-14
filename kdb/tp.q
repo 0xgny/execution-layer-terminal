@@ -6,7 +6,7 @@
 / .
 
 / The tickerplant does NO analytics and NO storage of its own. Its only jobs
-/ are (1) route messages and (2) — in a production system — write a replay log
+/ are (1) route messages and (2) -- in a production system -- write a replay log
 / for disaster recovery. The replay log is intentionally omitted here and left
 / as a documented next step (see docs/architecture.md).
 / .
@@ -54,7 +54,9 @@ subscribers:()!()
 / ---------------------------------------------------------------------------
 requested:`$();                              / symbols the terminal has asked for
 products:`$();                               / catalog of tradable products (from feed)
+universe:`$();                               / symbols the feed is actually streaming
 .u.addsym:{[s] requested::distinct requested,s; };
 .u.setproducts:{[x] products::x; };
+.u.setuniverse:{[x] universe::x; };
 
 -1 "[tp] Tickerplant up on port 5010. Waiting for feedhandler + subscribers.";

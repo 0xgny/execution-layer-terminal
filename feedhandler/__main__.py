@@ -41,6 +41,10 @@ def main() -> None:
     config = Config()
     if args.symbols:
         config.symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    elif args.venue == "coinbase":
+        # Boot the Coinbase feed on the full top-crypto universe by default.
+        from .universe import TOP_CRYPTO
+        config.symbols = list(TOP_CRYPTO)
     if args.tp_host:
         config.tp_host = args.tp_host
     if args.tp_port:

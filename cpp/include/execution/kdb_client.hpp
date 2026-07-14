@@ -42,6 +42,9 @@ public:
     // Catalog of tradable products (tickerplant `products`).
     std::vector<std::string> products();
 
+    // Symbols the feed is actually streaming (tickerplant `universe`).
+    std::vector<std::string> universe();
+
     // Control plane: ask the feed to start streaming a symbol (tickerplant).
     bool add_symbol(const std::string& symbol);
 

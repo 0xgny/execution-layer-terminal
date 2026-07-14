@@ -1,8 +1,10 @@
 # Architecture
 
 This document describes the whole intended system and the reasoning behind it.
-Only Phase 1 (the feedhandler + KDB+ tick store) is built today; later phases are
-described so the current design choices make sense in context.
+The market-data pipeline, the C++ execution terminal, and the docked GUI are
+built; the analysis-signal layer and on-disk history are still planned. Some
+later-phase sections below describe the intended end state rather than today's
+code.
 
 ## 1. Design goals
 
@@ -18,7 +20,7 @@ described so the current design choices make sense in context.
    of rows to Python. This is the "data gravity" principle from q-sim.
 4. **Two speeds of analysis.** Cheap signals run continuously in q; expensive
    models (regression, cointegration) run periodically in Python over rolling
-   windows. See §4.
+   windows. See Sec. 4.
 5. **Safety before speed in execution.** The execution layer is an OMS with risk
    controls and a paper matching engine *first*; live order routing is last and
    optional.
@@ -27,22 +29,23 @@ described so the current design choices make sense in context.
 
 | Component | Language | Port | Status | Role |
 |---|---|---|---|---|
-| `kdb/schema.q` | q | — | ✅ | Shared `trade`/`quote` table contract |
-| `kdb/tp.q` (tickerplant) | q | 5010 | ✅ | Pub/sub router; no compute, no storage |
-| `kdb/rdb.q` (RDB) | q | 5011 | ✅ | In-memory intraday store + query surface |
-| `feedhandler/` | Python | — | ✅ | Normalize exchange streams (Binance, Coinbase) → publish to tp |
-| Execution core (`cpp/`) | C++ | — | ✅ | OMS state machine, risk gate + kill switch, paper matching |
-| `KdbMarketData` (C++ ↔ RDB) | C++ | — | ⬜ Planned | Live quotes into the execution core via the KDB+ C API |
-| Analysis Engine | Python | — | ⬜ Planned | Rolling metrics/ML → `signal` table |
-| HDB (historical DB) | q | — | ⬜ Planned | On-disk partitioned tick history |
-| Terminal GUI | C++ (ImGui) | — | ⬜ Planned | Bloomberg-style live dashboard |
+| `kdb/schema.q` | q | -- | [x] | Shared `trade`/`quote` table contract |
+| `kdb/tp.q` (tickerplant) | q | 5010 | [x] | Pub/sub router; no compute, no storage |
+| `kdb/rdb.q` (RDB) | q | 5011 | [x] | In-memory intraday store + query surface |
+| `feedhandler/` | Python | -- | [x] | Normalize exchange streams (Binance, Coinbase) -> publish to tp |
+| Execution core (`cpp/`) | C++ | -- | [x] | OMS state machine, risk gate + kill switch, paper matching |
+| `KdbClient` (C++ <-> KDB+) | C++ | -- | [x] | Live quotes/history via a pure-socket q IPC client |
+| `TradingEngine` | C++ | -- | [x] | Threaded desk: polls quotes, runs OMS, publishes a view |
+| Terminal GUI | C++ (ImGui) | -- | [x] | Bloomberg-style docked dashboard + live charts |
+| Analysis Engine | Python | -- | [ ] Planned | Rolling metrics/ML -> `signal` table |
+| HDB (historical DB) | q | -- | [ ] Planned | On-disk partitioned tick history |
 
 ## 3. Data flow (Phase 1, built)
 
 1. A **feedhandler** connects to an exchange WebSocket and receives raw
    trade/quote messages.
 2. Each message is normalized into a neutral `Trade` / `Quote` dataclass
-   (`feedhandler/schema.py`) — same shape regardless of venue.
+   (`feedhandler/schema.py`) -- same shape regardless of venue.
 3. Ticks are **buffered** and **flushed** on a timer (default 250 ms) or when the
    buffer fills, to amortize IPC cost.
 4. The **publisher** (`publisher.py`) turns each buffered batch into typed PyKX
@@ -59,7 +62,7 @@ The shared contract (`kdb/schema.q`), and how it improves on q-sim's prototype:
 
 | Column | Type | Notes / difference from q-sim |
 |---|---|---|
-| `time` | timestamp | Full date+ns (q-sim used `timespan`, offset-from-midnight — breaks across days; crypto is 24/7) |
+| `time` | timestamp | Full date+ns (q-sim used `timespan`, offset-from-midnight -- breaks across days; crypto is 24/7) |
 | `recv` | timestamp | Feedhandler receive time; `recv - time` = ingestion latency (new) |
 | `sym` | symbol | Instrument, e.g. `` `BTCUSDT `` |
 | `exch` | symbol | Source venue (new; enables multi-exchange multiplexing) |
@@ -71,37 +74,38 @@ The shared contract (`kdb/schema.q`), and how it improves on q-sim's prototype:
 
 The Stock-Analysis-Engine's calculations split cleanly by cost:
 
-- **Continuous, cheap, in q** — VWAP, order-flow imbalance, moving-average
+- **Continuous, cheap, in q** -- VWAP, order-flow imbalance, moving-average
   momentum, rolling volatility, rolling correlation. These reduce data volume and
   belong on the server. (q-sim already prototyped VWAP, imbalance via `aj`, and MA
   momentum.)
-- **Periodic, expensive, in Python** — pairwise regression / β, Engle-Granger
+- **Periodic, expensive, in Python** -- pairwise regression / beta, Engle-Granger
   cointegration, skew/kurtosis. Run on a timer (e.g. every N seconds) over a
   lookback window pulled from the RDB; results are written back into a KDB+
   `signal` table that the execution layer subscribes to.
 
-## 5. Execution layer (Phases 4–7, planned)
+## 5. Execution layer (Phases 4-7, planned)
 
-- **Transport:** the C++ engine connects to KDB+ via the native C API (`k.h`),
-  subscribing to the `signal` table (from analytics) and live prices (from the
-  RDB). No Python in the execution hot path.
-- **Core:** an order state machine (New → Sent → PartiallyFilled → Filled /
+- **Transport:** the C++ engine connects to KDB+ via a small pure-socket q IPC
+  client (no external SDK -- KX's `c.o` is not published for arm64 macOS), reading
+  live prices/history from the RDB and, when built, the `signal` table. No Python
+  in the execution hot path.
+- **Core:** an order state machine (New -> Sent -> PartiallyFilled -> Filled /
   Cancelled / Rejected) with idempotent order IDs.
 - **Risk (in front of every order):** position limits, max order size, max
   notional, rate limiting, and a kill switch. Non-negotiable and built early.
 - **Matching:** a paper/simulated matching engine fills orders against the live
-  book first — this doubles as the backtester and the safety net — before any real
+  book first -- this doubles as the backtester and the safety net -- before any real
   routing.
 - **Strategy input:** declarative strategy specs (YAML/JSON) interpreted by a
   small rules engine, later augmented with embedded scripting (Lua/Python) so
   users define strategies without recompiling C++.
-- **GUI:** Dear ImGui + ImPlot, themed as a Bloomberg-style terminal — live
+- **GUI:** Dear ImGui + ImPlot, themed as a Bloomberg-style terminal -- live
   blotter, positions, PnL, signal feed, price charts.
 
 ## 6. Deliberately deferred
 
 - **Tickerplant replay log** for disaster recovery (standard in production KDB+).
-- **HDB + end-of-day flush** — the RDB is memory-only for now.
+- **HDB + end-of-day flush** -- the RDB is memory-only for now.
 - **Authentication** for exchange order routing and Coinbase's authenticated
   market-data channels.
 - **Backpressure / drop policy** if a subscriber can't keep up (today we rely on

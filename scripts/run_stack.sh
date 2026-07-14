@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# run_stack.sh — bring up the Phase 1 tick pipeline for local development.
+# run_stack.sh -- bring up the Phase 1 tick pipeline for local development.
 #
 # Launches, in order:
 #   1. tickerplant (kdb/tp.q)  on port 5010
@@ -19,9 +19,10 @@ set -euo pipefail
 
 VENUE="${1:-mock}"
 # Default symbols are venue-native: Coinbase uses dash pairs (BTC-USD),
-# Binance/mock use concatenated pairs (BTCUSDT).
+# Binance/mock use concatenated pairs (BTCUSDT). For Coinbase with no explicit
+# symbols we leave it empty so the feedhandler boots the full top-crypto universe.
 if [[ "$VENUE" == "coinbase" ]]; then
-  SYMBOLS="${2:-BTC-USD,ETH-USD}"
+  SYMBOLS="${2:-}"
 else
   SYMBOLS="${2:-BTCUSDT,ETHUSDT}"
 fi
@@ -65,4 +66,8 @@ RDB_PID=$!
 sleep 1
 
 echo "[run_stack] starting feedhandler (Ctrl-C to stop)"
-"$PY" -u -m feedhandler --venue "$VENUE" --symbols "$SYMBOLS"
+if [[ -n "$SYMBOLS" ]]; then
+  "$PY" -u -m feedhandler --venue "$VENUE" --symbols "$SYMBOLS"
+else
+  "$PY" -u -m feedhandler --venue "$VENUE"
+fi

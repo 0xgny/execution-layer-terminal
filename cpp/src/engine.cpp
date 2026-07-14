@@ -50,11 +50,9 @@ void TradingEngine::log(const std::string& s) {
 
 void TradingEngine::run() {
     pf_.fund(initial_capital_);
-    if (!kdb_.connect(host_, port_)) {
-        log("connect failed: " + kdb_.last_error());
-    } else {
-        log("connected to RDB " + host_ + ":" + std::to_string(port_));
-    }
+    if (!kdb_.connect(host_, port_)) log("connect failed: " + kdb_.last_error());
+    else log("connected to RDB " + host_ + ":" + std::to_string(port_));
+    ctrl_.connect(host_, tp_port_);  // control plane (tickerplant)
 
     while (running_) {
         // 1. drain commands
@@ -68,9 +66,8 @@ void TradingEngine::run() {
         }
 
         // 2. reconnect if needed
-        if (!kdb_.connected()) {
-            if (kdb_.connect(host_, port_)) log("reconnected to RDB");
-        }
+        if (!kdb_.connected() && kdb_.connect(host_, port_)) log("reconnected to RDB");
+        if (!ctrl_.connected()) ctrl_.connect(host_, tp_port_);
 
         // 3. poll live quotes
         if (kdb_.connected()) {
@@ -78,7 +75,21 @@ void TradingEngine::run() {
             for (auto& q : qs) quotes_[q.symbol] = q;
         }
 
+        // 4. periodic: price history for the focused symbol (~2x/s) and the
+        //    product catalog (~every 2s). Cheaper than doing them every cycle.
+        if (kdb_.connected() && !focus_.empty() && (cycle_ % 15 == 0))
+            price_hist_ = kdb_.history(focus_, 300);
+        if (ctrl_.connected() && (cycle_ % 66 == 0 || products_.empty())) {
+            products_ = ctrl_.products();
+            // Auto-populate the watch list from whatever the feed is streaming.
+            for (const auto& s : ctrl_.universe())
+                if (std::find(symbols_.begin(), symbols_.end(), s) == symbols_.end())
+                    symbols_.push_back(s);
+            if (focus_.empty() && !symbols_.empty()) focus_ = symbols_.front();
+        }
+
         publish();
+        ++cycle_;
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
 }
@@ -88,7 +99,17 @@ void TradingEngine::process(const Command& c) {
         if (!c.symbol.empty() &&
             std::find(symbols_.begin(), symbols_.end(), c.symbol) == symbols_.end()) {
             symbols_.push_back(c.symbol);
+            ctrl_.add_symbol(c.symbol);  // ask the feed to start streaming it
+            focus_ = c.symbol;           // focus the chart on the new ticker
+            price_hist_.clear();
             log("watching " + c.symbol);
+        }
+        return;
+    }
+    if (c.type == Command::SetFocus) {
+        if (!c.symbol.empty() && c.symbol != focus_) {
+            focus_ = c.symbol;
+            price_hist_.clear();
         }
         return;
     }
@@ -144,6 +165,12 @@ void TradingEngine::publish() {
     v.unrealized = pf_.unrealized(marks);
     v.total_pnl = pf_.total_pnl(marks);
 
+    // Sample the account time series (ring buffer, ~54s at 33 Hz).
+    pnl_hist_.push_back(v.total_pnl);
+    eq_hist_.push_back(v.equity);
+    while (pnl_hist_.size() > 1800) pnl_hist_.pop_front();
+    while (eq_hist_.size() > 1800) eq_hist_.pop_front();
+
     for (const std::string& sym : symbols_) {
         SymbolView sv;
         sv.symbol = sym;
@@ -167,6 +194,11 @@ void TradingEngine::publish() {
         v.symbols.push_back(std::move(sv));
     }
     v.log.assign(log_.begin(), log_.end());
+    v.products = products_;
+    v.focus = focus_;
+    v.price_history = price_hist_;
+    v.pnl_history.assign(pnl_hist_.begin(), pnl_hist_.end());
+    v.equity_history.assign(eq_hist_.begin(), eq_hist_.end());
 
     std::lock_guard<std::mutex> lk(view_mu_);
     view_ = std::move(v);

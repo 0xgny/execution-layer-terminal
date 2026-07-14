@@ -19,9 +19,21 @@
 / Connect to the tickerplant. `hopen` returns a handle we use to subscribe.
 tph:hopen `::5010
 
+/ Last-value caches (keyed by sym) so snap is O(#symbols) instead of scanning the
+/ full, ever-growing trade/quote tables on every poll. Refreshed on each update.
+lastquote:([sym:`symbol$()] bid:`float$(); ask:`float$(); bsize:`float$(); asize:`float$());
+lasttrade:([sym:`symbol$()] price:`float$());
+
 / .u.upd[t;data] : the tickerplant calls this on us for every published update.
-/ We simply append the column vectors into the matching local table.
-.u.upd:{[t;data] t insert data; }
+/ Append the column vectors into the local table, then refresh the last-value
+/ cache from just the rows we inserted.
+.u.upd:{[t;data]
+    t insert data;
+    n:count first data;
+    $[t=`quote; `lastquote upsert `sym xkey select sym,bid,ask,bsize,asize from (neg n)#quote;
+      t=`trade; `lasttrade upsert `sym xkey select sym,price from (neg n)#trade;
+      ()];
+ }
 
 / Subscribe to the tables we care about.
 tph(`.u.sub;`trade);
@@ -42,10 +54,7 @@ counts:{
 / plus last trade price. This is the flat, column-oriented shape the C++ terminal
 / polls over IPC (easy to parse with the k.h accessors). `price` is null until a
 / symbol has printed a trade.
-snap:{[syms]
-    qt:select last bid, last ask, last bsize, last asize by sym from quote where sym in syms;
-    tt:select last price by sym from trade where sym in syms;
-    0!(qt lj tt) }
+snap:{[syms] 0!(select from lastquote where sym in syms) lj lasttrade }
 
 / hist[sym;n] -> the last n trade prices for a symbol (a float vector). Used by
 / the C++ terminal to draw a live price chart.

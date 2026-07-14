@@ -3,11 +3,11 @@
 Uses Coinbase's public Exchange WebSocket feed (``ws-feed.exchange.coinbase.com``).
 The ``matches`` and ``ticker`` channels are public and require no authentication,
 which keeps this a drop-in sibling of the Binance handler. (The ``level2`` /
-order-book channels require a signed JWT — deliberately out of scope here; see
+order-book channels require a signed JWT -- deliberately out of scope here; see
 docs/decisions/0001-exchange-choice.md.)
 
 Symbol format note: Coinbase product ids are dash-separated quote pairs, e.g.
-``BTC-USD`` / ``ETH-USD`` — NOT Binance's ``BTCUSDT``. Pass venue-native symbols:
+``BTC-USD`` / ``ETH-USD`` -- NOT Binance's ``BTCUSDT``. Pass venue-native symbols:
     python -m feedhandler --venue coinbase --symbols BTC-USD,ETH-USD
 
 Channels consumed:
@@ -45,8 +45,8 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _iso_to_ns(ts: str) -> int:
-    """Parse a Coinbase ISO-8601 UTC timestamp to unix nanoseconds (µs precision)."""
-    # e.g. "2014-11-07T08:19:27.028459Z" — fromisoformat handles the trailing Z on 3.11+
+    """Parse a Coinbase ISO-8601 UTC timestamp to unix nanoseconds (us precision)."""
+    # e.g. "2014-11-07T08:19:27.028459Z" -- fromisoformat handles the trailing Z on 3.11+
     dt = datetime.fromisoformat(ts)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -64,7 +64,8 @@ def _subscribe_msg(product_ids: list[str]) -> str:
 
 class CoinbaseFeedHandler(BaseFeedHandler):
     exchange_name = "coinbase"
-    _ws = None  # class default so the control loop can safely check it early
+    _ws = None       # class default so the control loop can safely check it early
+    _catalog = None  # set of valid product ids (once the catalog is fetched)
 
     async def _run(self) -> None:
         # Imported lazily so mock/offline runs don't require the websockets dep.
@@ -73,15 +74,25 @@ class CoinbaseFeedHandler(BaseFeedHandler):
         ssl_ctx = self._build_ssl_context()
         await self._publish_catalog(ssl_ctx)
 
+        # Drop any boot symbols that aren't in the live catalog (delisted, typo'd).
+        if self._catalog:
+            valid = [s for s in self._subscribed if s in self._catalog]
+            dropped = len(self._subscribed) - len(valid)
+            self._subscribed = set(valid)
+            if dropped:
+                print(f"[coinbase] dropped {dropped} boot symbols not in catalog")
+
         while self._running:
             try:
                 prods = sorted(self._subscribed)
-                print(f"[coinbase] connecting: {_WS_URL} products={prods}")
-                async with websockets.connect(_WS_URL, ssl=ssl_ctx, ping_interval=20) as ws:
+                print(f"[coinbase] connecting: {len(prods)} products")
+                async with websockets.connect(_WS_URL, ssl=ssl_ctx, ping_interval=20,
+                                              max_queue=2048) as ws:
                     self._ws = ws
                     # (re)subscribe to everything we currently want on (re)connect
                     await ws.send(_subscribe_msg(prods))
-                    print("[coinbase] connected + subscribed (matches, ticker)")
+                    self.publisher.set_universe(prods)
+                    print(f"[coinbase] connected + subscribed to {len(prods)} products")
                     async for raw in ws:
                         self._handle_message(raw)
             except Exception as exc:  # noqa: BLE001 - reconnect on any error
@@ -96,6 +107,7 @@ class CoinbaseFeedHandler(BaseFeedHandler):
         # products to the live socket at runtime.
         if self._ws is not None:
             await self._ws.send(_subscribe_msg(syms))
+            self.publisher.set_universe(sorted(set(self._subscribed) | set(syms)))
 
     async def _publish_catalog(self, ssl_ctx) -> None:
         """Fetch the list of tradable USD/USDC products and publish it so the
@@ -117,6 +129,7 @@ class CoinbaseFeedHandler(BaseFeedHandler):
         try:
             loop = _asyncio.get_running_loop()
             ids = await loop.run_in_executor(None, fetch)
+            self._catalog = set(ids)
             self.publisher.set_products(ids)
             print(f"[coinbase] published catalog: {len(ids)} USD/USDC products")
         except Exception as exc:  # noqa: BLE001
