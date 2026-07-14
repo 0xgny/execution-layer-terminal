@@ -23,6 +23,15 @@ inline const char* to_string(Side s) { return s == Side::Buy ? "BUY" : "SELL"; }
 inline Side opposite(Side s) { return s == Side::Buy ? Side::Sell : Side::Buy; }
 inline double signed_qty(Side s, double qty) { return s == Side::Buy ? qty : -qty; }
 
+// Which market a symbol belongs to. Crypto flows live via Coinbase -> KDB+;
+// Stock flows via the Alpaca REST client (see alpaca_client.hpp/stock_feed.hpp).
+// The OMS, risk manager, and matching engine are asset-agnostic -- they only
+// ever see a Quote/Order/Fill, never this tag. It exists purely so the engine
+// can route control-plane actions (AddSymbol) and the GUI can label rows.
+enum class AssetClass { Crypto, Stock };
+
+inline const char* to_string(AssetClass a) { return a == AssetClass::Crypto ? "CRYPTO" : "STOCK"; }
+
 enum class OrderType { Market, Limit };
 inline const char* to_string(OrderType t) { return t == OrderType::Market ? "MKT" : "LMT"; }
 
@@ -50,6 +59,7 @@ struct Quote {
     double bsize = 0.0;
     double asize = 0.0;
     TimestampNs ts_ns = 0;
+    AssetClass asset_class = AssetClass::Crypto;
 
     double mid() const { return 0.5 * (bid + ask); }
     double spread() const { return ask - bid; }

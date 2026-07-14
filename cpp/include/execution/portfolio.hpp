@@ -8,14 +8,30 @@
 // ============================================================================
 #pragma once
 
+#include <cmath>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "execution/types.hpp"
 
 namespace el {
 
 using MarkMap = std::map<std::string, double>;  // symbol -> mark price
+
+// A fully closed round trip: the position went from nonzero back to exactly
+// zero on this fill. Recorded so the GUI can split Positions into an open
+// ("Current") table and a closed ("Previous") one -- today the raw Position
+// map keeps every symbol forever (net_qty resets to 0 but the entry stays),
+// so there was no way to tell "closed" from "never opened" without this.
+struct ClosedPosition {
+    std::string symbol;
+    double qty = 0.0;          // size that was closed on this round trip
+    double avg_entry = 0.0;
+    double exit_price = 0.0;
+    double realized_pnl = 0.0; // pnl of this round trip only, not lifetime
+    TimestampNs closed_ts_ns = 0;
+};
 
 class Portfolio {
 public:
@@ -24,6 +40,7 @@ public:
     double initial_capital() const { return initial_capital_; }
     double cash() const { return cash_; }
     const std::map<std::string, Position>& positions() const { return positions_; }
+    const std::vector<ClosedPosition>& closed_positions() const { return closed_; }
 
     double net_qty(const std::string& sym) const {
         auto it = positions_.find(sym);
@@ -31,11 +48,23 @@ public:
     }
 
     // Apply a fill: update the position and move cash (buy spends, sell receives).
+    // If this fill closes the position exactly flat, record a ClosedPosition.
     void apply(const Fill& f) {
         Position& p = positions_[f.symbol];
         if (p.symbol.empty()) p.symbol = f.symbol;
+
+        const double net_before = p.net_qty;
+        const double avg_before = p.avg_price;
+        const double realized_before = p.realized_pnl;
+
         p.apply(f);
         cash_ += (f.side == Side::Buy ? -1.0 : 1.0) * f.qty * f.price;
+
+        if (net_before != 0.0 && p.net_qty == 0.0) {
+            closed_.push_back(ClosedPosition{
+                f.symbol, std::abs(net_before), avg_before, f.price,
+                p.realized_pnl - realized_before, f.ts_ns});
+        }
     }
 
     double positions_value(const MarkMap& marks) const {
@@ -66,6 +95,7 @@ private:
     double initial_capital_ = 0.0;
     double cash_ = 0.0;
     std::map<std::string, Position> positions_;
+    std::vector<ClosedPosition> closed_;
 };
 
 }  // namespace el

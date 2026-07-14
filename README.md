@@ -1,9 +1,11 @@
 # Execution Layer
 
-A real-time crypto paper-trading terminal. It streams live market data from
-Coinbase into a KDB+ tick store, and a C++ "Bloomberg-style" terminal reads that
-data over IPC to let you trade a simulated account with real-time PnL, live price
-and PnL charts, and an order blotter.
+A real-time paper-trading terminal spanning two asset classes. Crypto streams
+live from Coinbase into a KDB+ tick store; stocks come from Alpaca's free
+market-data API (real IEX-venue real-time quotes + historical daily bars). A
+C++ "Bloomberg-style" terminal reads both over IPC/REST to let you trade a
+simulated account with real-time PnL, live price and PnL charts, and an order
+blotter.
 
 It fuses two earlier projects:
 
@@ -17,27 +19,30 @@ Everything is paper trading. No real orders are ever routed.
 ## Architecture
 
 ```
-  Coinbase WebSocket
-         |
-         v
-  Feedhandler (Python)            normalizes trades/quotes, publishes over IPC
-         |
-         v
-  Tickerplant  tp.q  :5010        pub/sub router + control plane (add-symbol,
-         |                        product catalog, streaming universe)
-         v
-  Real-time DB  rdb.q  :5011      in-memory tick store + last-value caches;
-         |                        answers snap[] / hist[] queries
-         |  (q IPC over a plain socket)
-         v
-  C++ terminal
-    KdbClient  ->  TradingEngine (background thread)  ->  ImGui/ImPlot GUI
-                   OMS + risk gate + paper matching + portfolio/PnL
+  Coinbase WebSocket                          Alpaca REST (IEX real-time)
+         |                                            |
+         v                                            v
+  Feedhandler (Python)                          AlpacaClient (libcurl)
+         |                                            |
+         v                                            v
+  Tickerplant  tp.q  :5010               StockFeed (own background thread,
+         |                               polls + caches, rate-limit aware)
+         v                                            |
+  Real-time DB  rdb.q  :5011                          |
+         |  (q IPC over a plain socket)                |
+         v                                            v
+                    C++ terminal
+    KdbClient + StockFeed  ->  TradingEngine (background thread)  ->  ImGui/ImPlot GUI
+                                OMS + risk gate + paper matching + portfolio/PnL
 ```
 
-The KDB+ tickerplant/RDB is the shared low-latency backbone. Python does
-ingestion; C++ does execution and the UI; both speak to KDB+ over IPC. Swapping
-the data source (exchange) is isolated to one feedhandler class.
+The KDB+ tickerplant/RDB is the shared low-latency backbone for crypto. Python
+does ingestion; C++ does execution and the UI; both speak to KDB+ over IPC.
+Stocks are a second, independent source: the C++ terminal talks to Alpaca
+directly over HTTPS (no Python/KDB+ involved), on its own thread so a slow HTTP
+round-trip never stalls crypto polling or the GUI. Swapping either data source
+is isolated to one class (`BaseFeedHandler` subclass for crypto venues,
+`AlpacaClient`/`StockFeed` for stocks).
 
 For a complete, detailed walkthrough of the architecture, frameworks, the q IPC
 protocol, the threading model, and traced end-to-end workflows, see `design.md`.
@@ -48,10 +53,13 @@ protocol, the threading model, and traced end-to-end workflows, see `design.md`.
 ## Prerequisites
 
 - macOS (Apple Silicon supported) or Linux
-- KDB+ / q with a license (the free `kc.lic` community license is fine)
-- Python 3.11 (PyKX does not yet support 3.14 cleanly - see Gotchas)
+- KDB+ / q with a license (the free `kc.lic` community license is fine) -- crypto only
+- Python 3.11 (PyKX does not yet support 3.14 cleanly - see Gotchas) -- crypto only
 - A C++20 compiler (Apple clang works)
-- For the GUI: GLFW, plus the vendored Dear ImGui and ImPlot (fetched below)
+- For the GUI: GLFW, plus the vendored Dear ImGui, ImPlot, and nlohmann/json (fetched below)
+- libcurl (ships with macOS/most Linux distros) -- for the stock feed
+- Optional, for stocks: a free [Alpaca](https://alpaca.markets) account and API
+  key/secret. Without it the terminal runs exactly as before, crypto-only.
 
 ---
 
@@ -74,11 +82,18 @@ brew install glfw
 cd cpp/third_party
 git clone --depth 1 --branch docking https://github.com/ocornut/imgui.git
 git clone --depth 1 https://github.com/epezent/implot.git
+mkdir -p json && curl -fsSL -o json/json.hpp \
+  https://github.com/nlohmann/json/releases/latest/download/json.hpp
 cd ../..
 
 # Tell q where its home + license live (adjust to your install)
 export QHOME="$HOME/.kx/q"
 export QLIC="$HOME/.kx"
+
+# Optional: enables the Stocks tab (Alpaca free market-data plan). Without
+# these the terminal runs crypto-only, same as before.
+export ALPACA_API_KEY_ID="..."
+export ALPACA_API_SECRET_KEY="..."
 ```
 
 ### 2. Start the data stack (terminal 1)
@@ -113,10 +128,18 @@ arguments: `./build/terminal <rdb-host> <rdb-port>` (default `127.0.0.1 5011`).
 ### 4. Trade
 
 1. Enter your initial capital and click START DESK.
-2. Market Watch fills with the live universe. Click any row to chart it.
-3. In the Order Ticket, pick a symbol, enter a dollar amount, and BUY / SELL.
-4. Watch the price chart and the PnL chart (green in profit, red in loss).
-5. Close a position with FLATTEN (in the ticket or per-row in Positions).
+2. Market Watch fills with the live crypto universe (Crypto tab). If Alpaca is
+   configured, switch to the Stocks tab and type an exact ticker (e.g. `AAPL`)
+   in "+ Add Stock" -- there's no bulk catalog to browse for stocks, unlike
+   crypto's Ticker Search, so you type the symbol directly.
+3. Click any row to chart it.
+4. In the Order Ticket, pick a symbol, choose `$` notional or exact `Qty`, and
+   BUY / SELL.
+5. Watch the price chart and the PnL chart (green in profit, red in loss).
+6. Close a position with FLATTEN (in the ticket or per-row in Positions >
+   Current). It then moves to Positions > Previous with its entry/exit/realized
+   PnL. Click any Current position to jump to the Order Ticket pre-filled at
+   its exact size, to top up or exit precisely.
 
 To stop: Ctrl-C in terminal 1 (it tears down the q processes).
 
@@ -152,9 +175,10 @@ execution-layer/
     universe.py            default top-crypto universe subscribed at boot
     __main__.py            CLI entrypoint (--venue coinbase|binance|mock)
   cpp/                     C++ execution terminal
-    include/execution/     types, portfolio, risk, oms, matching, kdb_client, engine
+    include/execution/     types, portfolio, risk, oms, matching, kdb_client,
+                            alpaca_client, stock_feed, engine
     src/                   implementations + terminal_gui.cpp + headless tests
-    Makefile               build (make gui / make all)
+    Makefile               build (make gui / make all / make alpaca-test)
     README.md              terminal design + build detail
   scripts/run_stack.sh     launch tp + rdb + feedhandler together
   docs/                    design docs and decision records
@@ -195,12 +219,14 @@ Tested end to end on Apple Silicon:
 
 Done: live feedhandler (Binance + Coinbase); tickerplant/RDB with caches; native
 C++ KDB+ client; threaded engine with paper OMS, risk gate, and matching; docked
-Bloomberg-style GUI with account bar, market watch, ticker search, order ticket,
-positions, event log, and live price + PnL charts; runtime control plane to add
-any ticker; top-crypto boot universe.
+Bloomberg-style GUI with account bar, tabbed market watch (crypto + stocks),
+ticker search, order ticket, tabbed positions (current/previous), event log, and
+live price + PnL charts; runtime control plane to add any crypto ticker;
+top-crypto boot universe; stocks via Alpaca's free real-time IEX data API on a
+dedicated polling thread.
 
 Next: candlestick / OHLC charts with historical backfill; an Analysis Engine that
 publishes signals into a KDB+ `signal` table for the engine to consume; end-of-day
-persistence to an on-disk HDB; a polled stock feed (e.g. Yahoo); optional live
-order routing to an exchange testnet behind the risk gate.
+persistence to an on-disk HDB; optional live order routing to an exchange testnet
+behind the risk gate.
 ```

@@ -25,12 +25,14 @@ TradingEngine::~TradingEngine() { stop(); }
 void TradingEngine::start() {
     if (running_) return;
     running_ = true;
+    stocks_.start();
     thread_ = std::thread([this] { run(); });
 }
 
 void TradingEngine::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
+    stocks_.stop();
 }
 
 void TradingEngine::post(const Command& c) {
@@ -69,16 +71,22 @@ void TradingEngine::run() {
         if (!kdb_.connected() && kdb_.connect(host_, port_)) log("reconnected to RDB");
         if (!ctrl_.connected()) ctrl_.connect(host_, tp_port_);
 
-        // 3. poll live quotes
+        // 3. poll live quotes (crypto over KDB+, stocks from StockFeed's cache --
+        //    the latter is a cheap mutex copy; the HTTP calls happen on StockFeed's
+        //    own thread so they never stall this loop or the crypto polling above).
         if (kdb_.connected()) {
             auto qs = kdb_.snapshot(symbols_);
             for (auto& q : qs) quotes_[q.symbol] = q;
         }
+        for (auto& [sym, q] : stocks_.snapshot()) quotes_[sym] = q;
 
         // 4. periodic: price history for the focused symbol (~2x/s) and the
         //    product catalog (~every 2s). Cheaper than doing them every cycle.
-        if (kdb_.connected() && !focus_.empty() && (cycle_ % 15 == 0))
-            price_hist_ = kdb_.history(focus_, 300);
+        if (!focus_.empty() && (cycle_ % 15 == 0)) {
+            if (is_stock(focus_)) price_hist_ = stocks_.history(focus_);
+            else if (kdb_.connected()) price_hist_ = kdb_.history(focus_, 300);
+        }
+        for (const auto& e : stocks_.errors()) log(e);
         if (ctrl_.connected() && (cycle_ % 66 == 0 || products_.empty())) {
             products_ = ctrl_.products();
             // Auto-populate the watch list from whatever the feed is streaming.
@@ -96,8 +104,16 @@ void TradingEngine::run() {
 
 void TradingEngine::process(const Command& c) {
     if (c.type == Command::AddSymbol) {
-        if (!c.symbol.empty() &&
-            std::find(symbols_.begin(), symbols_.end(), c.symbol) == symbols_.end()) {
+        if (c.symbol.empty()) return;
+        if (c.asset_class == AssetClass::Stock) {
+            if (std::find(stock_symbols_.begin(), stock_symbols_.end(), c.symbol) == stock_symbols_.end()) {
+                stock_symbols_.push_back(c.symbol);
+                stocks_.watch(c.symbol);  // starts polling on StockFeed's thread
+                focus_ = c.symbol;
+                price_hist_.clear();
+                log("watching " + c.symbol + " (stock, Alpaca/IEX)");
+            }
+        } else if (std::find(symbols_.begin(), symbols_.end(), c.symbol) == symbols_.end()) {
             symbols_.push_back(c.symbol);
             ctrl_.add_symbol(c.symbol);  // ask the feed to start streaming it
             focus_ = c.symbol;           // focus the chart on the new ticker
@@ -171,9 +187,11 @@ void TradingEngine::publish() {
     while (pnl_hist_.size() > 1800) pnl_hist_.pop_front();
     while (eq_hist_.size() > 1800) eq_hist_.pop_front();
 
-    for (const std::string& sym : symbols_) {
+    const auto& positions = pf_.positions();
+    auto build_row = [&](const std::string& sym, AssetClass cls) {
         SymbolView sv;
         sv.symbol = sym;
+        sv.asset_class = cls;
         auto qit = quotes_.find(sym);
         if (qit != quotes_.end()) {
             sv.has_quote = true;
@@ -183,7 +201,6 @@ void TradingEngine::publish() {
             sv.bsize = qit->second.bsize;
             sv.asize = qit->second.asize;
         }
-        const auto& positions = pf_.positions();
         auto pit = positions.find(sym);
         if (pit != positions.end()) {
             sv.net_qty = pit->second.net_qty;
@@ -191,17 +208,37 @@ void TradingEngine::publish() {
             sv.realized = pit->second.realized_pnl;
             if (sv.has_quote) sv.unrealized = pit->second.unrealized(sv.mid);
         }
-        v.symbols.push_back(std::move(sv));
+        return sv;
+    };
+    for (const std::string& sym : symbols_) v.symbols.push_back(build_row(sym, AssetClass::Crypto));
+    for (const std::string& sym : stock_symbols_) v.symbols.push_back(build_row(sym, AssetClass::Stock));
+
+    for (auto it = pf_.closed_positions().rbegin(); it != pf_.closed_positions().rend(); ++it) {
+        ClosedPositionView cv;
+        cv.symbol = it->symbol;
+        cv.asset_class = is_stock(it->symbol) ? AssetClass::Stock : AssetClass::Crypto;
+        cv.qty = it->qty;
+        cv.avg_entry = it->avg_entry;
+        cv.exit_price = it->exit_price;
+        cv.realized_pnl = it->realized_pnl;
+        cv.closed_ts_ns = it->closed_ts_ns;
+        v.closed_positions.push_back(cv);
     }
+
     v.log.assign(log_.begin(), log_.end());
     v.products = products_;
     v.focus = focus_;
     v.price_history = price_hist_;
     v.pnl_history.assign(pnl_hist_.begin(), pnl_hist_.end());
     v.equity_history.assign(eq_hist_.begin(), eq_hist_.end());
+    v.stocks_enabled = stocks_.configured();
 
     std::lock_guard<std::mutex> lk(view_mu_);
     view_ = std::move(v);
+}
+
+bool TradingEngine::is_stock(const std::string& symbol) const {
+    return std::find(stock_symbols_.begin(), stock_symbols_.end(), symbol) != stock_symbols_.end();
 }
 
 }  // namespace el

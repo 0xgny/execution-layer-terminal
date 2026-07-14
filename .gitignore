@@ -10,3 +10,4 @@ cpp/build/
 # Vendored GUI libs (fetch via cpp/README setup step)
 cpp/third_party/imgui/
 cpp/third_party/implot/
+cpp/third_party/json/

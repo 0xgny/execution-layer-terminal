@@ -152,8 +152,11 @@ int main(int argc, char** argv) {
     bool layout_built = false;
     float capital_input = 10'000.0f;
     char newsym[32] = "";
+    char newstock[32] = "";
     int sel_sym = 0;
     float order_notional = 1'000.0f;
+    bool ticket_use_qty = false;   // Order Ticket mode: $ notional vs exact qty
+    float ticket_qty = 0.0f;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -221,68 +224,155 @@ int main(int argc, char** argv) {
             if (!layout_built) { build_default_layout(dockspace_id); layout_built = true; }
             ImGui::End();
 
-            // --- Market Watch ---------------------------------------------------
-            ImGui::Begin("Market Watch");
-            ImGui::SetNextItemWidth(140);
-            ImGui::InputTextWithHint("##newsym", "e.g. SOL-USD", newsym, sizeof(newsym));
-            ImGui::SameLine();
-            if (ImGui::Button("+ Watch") && newsym[0]) {
-                for (char* p = newsym; *p; ++p) *p = (char)toupper(*p);
-                engine->post({Command::AddSymbol, newsym, 0, false});
-                newsym[0] = '\0';
-            }
-            if (ImGui::BeginTable("mw", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
-                ImGui::TableSetupColumn("SYMBOL");
-                ImGui::TableSetupColumn("BID");
-                ImGui::TableSetupColumn("ASK");
-                ImGui::TableSetupColumn("MID");
-                ImGui::TableSetupColumn("SPREAD");
-                ImGui::TableHeadersRow();
-                for (const auto& s : v.symbols) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
-                    if (ImGui::Selectable(s.symbol.c_str(), s.symbol == v.focus,
-                                          ImGuiSelectableFlags_SpanAllColumns))
-                        engine->post({Command::SetFocus, s.symbol, 0, false});
-                    ImGui::PopStyleColor();
-                    if (s.has_quote) {
-                        ImGui::TableNextColumn(); ImGui::TextColored(kGreen, "%s", commafy(s.bid).c_str());
-                        ImGui::TableNextColumn(); ImGui::TextColored(kRed, "%s", commafy(s.ask).c_str());
-                        ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.mid).c_str());
-                        ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.ask - s.bid).c_str());
-                    } else {
-                        ImGui::TableNextColumn(); ImGui::TextDisabled("...");
-                        ImGui::TableNextColumn(); ImGui::TextDisabled("...");
-                        ImGui::TableNextColumn(); ImGui::TextDisabled("...");
-                        ImGui::TableNextColumn(); ImGui::TextDisabled("...");
-                    }
+            // Symbol names for the Order Ticket combo, built once per frame so
+            // both the Order Ticket and Positions panels (below) can drive it --
+            // clicking a Positions row needs to select into this same list.
+            std::vector<const char*> names;
+            for (const auto& s : v.symbols) names.push_back(s.symbol.c_str());
+            if (!names.empty() && sel_sym >= (int)names.size()) sel_sym = 0;
+
+            // Point the Order Ticket at `sym`; if `prefill_qty` (clicking an open
+            // position), switch to exact-quantity mode pre-filled with the
+            // position's size so one click sets up either a top-up or an exit.
+            auto select_for_ticket = [&](const std::string& sym, double net_qty, bool prefill_qty) {
+                engine->post({Command::SetFocus, sym, 0, false});
+                for (int i = 0; i < (int)names.size(); ++i)
+                    if (sym == names[i]) { sel_sym = i; break; }
+                if (prefill_qty) {
+                    ticket_use_qty = true;
+                    ticket_qty = (float)std::abs(net_qty);
                 }
-                ImGui::EndTable();
+            };
+
+            // --- Market Watch (tabbed: Crypto is live via Coinbase/KDB+, Stocks
+            //     is Alpaca/IEX real-time -- two very differently-sourced feeds,
+            //     kept visually separate rather than mixed into one table) -------
+            ImGui::Begin("Market Watch");
+            if (ImGui::BeginTabBar("mw_tabs")) {
+                if (ImGui::BeginTabItem("Crypto")) {
+                    ImGui::SetNextItemWidth(140);
+                    ImGui::InputTextWithHint("##newsym", "e.g. SOL-USD", newsym, sizeof(newsym));
+                    ImGui::SameLine();
+                    if (ImGui::Button("+ Watch") && newsym[0]) {
+                        for (char* p = newsym; *p; ++p) *p = (char)toupper(*p);
+                        engine->post({Command::AddSymbol, newsym, 0, false, AssetClass::Crypto});
+                        newsym[0] = '\0';
+                    }
+                    if (ImGui::BeginTable("mw_crypto", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
+                        ImGui::TableSetupColumn("SYMBOL");
+                        ImGui::TableSetupColumn("BID");
+                        ImGui::TableSetupColumn("ASK");
+                        ImGui::TableSetupColumn("MID");
+                        ImGui::TableSetupColumn("SPREAD");
+                        ImGui::TableHeadersRow();
+                        for (const auto& s : v.symbols) {
+                            if (s.asset_class != AssetClass::Crypto) continue;
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+                            if (ImGui::Selectable(s.symbol.c_str(), s.symbol == v.focus,
+                                                  ImGuiSelectableFlags_SpanAllColumns))
+                                engine->post({Command::SetFocus, s.symbol, 0, false});
+                            ImGui::PopStyleColor();
+                            if (s.has_quote) {
+                                ImGui::TableNextColumn(); ImGui::TextColored(kGreen, "%s", commafy(s.bid).c_str());
+                                ImGui::TableNextColumn(); ImGui::TextColored(kRed, "%s", commafy(s.ask).c_str());
+                                ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.mid).c_str());
+                                ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.ask - s.bid).c_str());
+                            } else {
+                                ImGui::TableNextColumn(); ImGui::TextDisabled("...");
+                                ImGui::TableNextColumn(); ImGui::TextDisabled("...");
+                                ImGui::TableNextColumn(); ImGui::TextDisabled("...");
+                                ImGui::TableNextColumn(); ImGui::TextDisabled("...");
+                            }
+                        }
+                        ImGui::EndTable();
+                    }
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Stocks")) {
+                    if (!v.stocks_enabled) {
+                        ImGui::Spacing();
+                        ImGui::TextColored(kCyan, "Stocks are disabled.");
+                        ImGui::TextWrapped(
+                            "Set ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY in the "
+                            "environment before launching the terminal to enable them.");
+                    } else {
+                        ImGui::TextColored(kCyan, "IEX real-time");
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(single venue -- may vary slightly from consolidated NBBO)");
+                        ImGui::SetNextItemWidth(140);
+                        ImGui::InputTextWithHint("##newstock", "e.g. AAPL", newstock, sizeof(newstock));
+                        ImGui::SameLine();
+                        if (ImGui::Button("+ Add Stock") && newstock[0]) {
+                            for (char* p = newstock; *p; ++p) *p = (char)toupper(*p);
+                            engine->post({Command::AddSymbol, newstock, 0, false, AssetClass::Stock});
+                            newstock[0] = '\0';
+                        }
+                        if (ImGui::BeginTable("mw_stocks", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
+                            ImGui::TableSetupColumn("SYMBOL");
+                            ImGui::TableSetupColumn("BID");
+                            ImGui::TableSetupColumn("ASK");
+                            ImGui::TableSetupColumn("MID");
+                            ImGui::TableHeadersRow();
+                            for (const auto& s : v.symbols) {
+                                if (s.asset_class != AssetClass::Stock) continue;
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+                                if (ImGui::Selectable(s.symbol.c_str(), s.symbol == v.focus,
+                                                      ImGuiSelectableFlags_SpanAllColumns))
+                                    engine->post({Command::SetFocus, s.symbol, 0, false});
+                                ImGui::PopStyleColor();
+                                if (s.has_quote) {
+                                    ImGui::TableNextColumn(); ImGui::TextColored(kGreen, "%s", commafy(s.bid).c_str());
+                                    ImGui::TableNextColumn(); ImGui::TextColored(kRed, "%s", commafy(s.ask).c_str());
+                                    ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.mid).c_str());
+                                } else {
+                                    ImGui::TableNextColumn(); ImGui::TextDisabled("...");
+                                    ImGui::TableNextColumn(); ImGui::TextDisabled("...");
+                                    ImGui::TableNextColumn(); ImGui::TextDisabled("...");
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                    }
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
             }
             ImGui::End();
 
             // --- Order Ticket ---------------------------------------------------
             ImGui::Begin("Order Ticket");
-            std::vector<const char*> names;
-            for (const auto& s : v.symbols) names.push_back(s.symbol.c_str());
             if (!names.empty()) {
-                if (sel_sym >= (int)names.size()) sel_sym = 0;
                 ImGui::TextColored(kCyan, "Symbol");
                 ImGui::Combo("##sym", &sel_sym, names.data(), (int)names.size());
-                ImGui::TextColored(kCyan, "Notional ($)");
-                ImGui::InputFloat("##notional", &order_notional, 100.0f, 1000.0f, "%.2f");
-                if (order_notional < 0) order_notional = 0;
+
+                if (ImGui::RadioButton("$ Notional", !ticket_use_qty)) ticket_use_qty = false;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Qty", ticket_use_qty)) ticket_use_qty = true;
+
+                if (ticket_use_qty) {
+                    ImGui::TextColored(kCyan, "Quantity");
+                    ImGui::InputFloat("##qty", &ticket_qty, 0.0f, 0.0f, "%.6f");
+                    if (ticket_qty < 0) ticket_qty = 0;
+                } else {
+                    ImGui::TextColored(kCyan, "Notional ($)");
+                    ImGui::InputFloat("##notional", &order_notional, 100.0f, 1000.0f, "%.2f");
+                    if (order_notional < 0) order_notional = 0;
+                }
                 const std::string sym = names[sel_sym];
+                const double amount = ticket_use_qty ? (double)ticket_qty : (double)order_notional;
                 ImGui::Spacing();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.35f, 0.15f, 1.0f));
                 if (ImGui::Button("BUY", ImVec2(90, 34)))
-                    engine->post({Command::Buy, sym, order_notional, true});
+                    engine->post({Command::Buy, sym, amount, !ticket_use_qty});
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.40f, 0.12f, 0.12f, 1.0f));
                 if (ImGui::Button("SELL", ImVec2(90, 34)))
-                    engine->post({Command::Sell, sym, order_notional, true});
+                    engine->post({Command::Sell, sym, amount, !ticket_use_qty});
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
                 if (ImGui::Button("FLATTEN", ImVec2(90, 34)))
@@ -292,32 +382,73 @@ int main(int argc, char** argv) {
             }
             ImGui::End();
 
-            // --- Positions ------------------------------------------------------
+            // --- Positions (tabbed: Current open positions, click a row to load
+            //     it into the Order Ticket; Previous is closed round trips) ------
             ImGui::Begin("Positions");
-            if (ImGui::BeginTable("pos", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
-                ImGui::TableSetupColumn("SYMBOL");
-                ImGui::TableSetupColumn("NET");
-                ImGui::TableSetupColumn("AVG PX");
-                ImGui::TableSetupColumn("UNREAL");
-                ImGui::TableSetupColumn("REAL");
-                ImGui::TableSetupColumn("");
-                ImGui::TableHeadersRow();
-                for (const auto& s : v.symbols) {
-                    if (s.net_qty == 0.0 && s.realized == 0.0) continue;
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn(); ImGui::TextColored(kAmber, "%s", s.symbol.c_str());
-                    ImGui::TableNextColumn(); ImGui::Text("%.6f", s.net_qty);
-                    ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.avg_price).c_str());
-                    ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(s.unrealized), "%s", signed_money(s.unrealized).c_str());
-                    ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(s.realized), "%s", signed_money(s.realized).c_str());
-                    ImGui::TableNextColumn();
-                    if (s.net_qty != 0.0) {
-                        ImGui::PushID(s.symbol.c_str());
-                        if (ImGui::SmallButton("flatten")) engine->post({Command::Flatten, s.symbol, 0, false});
-                        ImGui::PopID();
+            if (ImGui::BeginTabBar("pos_tabs")) {
+                if (ImGui::BeginTabItem("Current")) {
+                    if (ImGui::BeginTable("pos_cur", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
+                        ImGui::TableSetupColumn("SYMBOL");
+                        ImGui::TableSetupColumn("CLASS");
+                        ImGui::TableSetupColumn("NET");
+                        ImGui::TableSetupColumn("AVG PX");
+                        ImGui::TableSetupColumn("UNREAL");
+                        ImGui::TableSetupColumn("REAL");
+                        ImGui::TableSetupColumn("");
+                        ImGui::TableHeadersRow();
+                        for (const auto& s : v.symbols) {
+                            if (s.net_qty == 0.0) continue;
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+                            if (ImGui::Selectable(s.symbol.c_str(), s.symbol == v.focus,
+                                                  ImGuiSelectableFlags_SpanAllColumns))
+                                select_for_ticket(s.symbol, s.net_qty, true);
+                            ImGui::PopStyleColor();
+                            ImGui::TableNextColumn();
+                            ImGui::TextDisabled("%s", s.asset_class == AssetClass::Stock ? "STOCK" : "CRYPTO");
+                            ImGui::TableNextColumn(); ImGui::Text("%.6f", s.net_qty);
+                            ImGui::TableNextColumn(); ImGui::Text("%s", commafy(s.avg_price).c_str());
+                            ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(s.unrealized), "%s", signed_money(s.unrealized).c_str());
+                            ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(s.realized), "%s", signed_money(s.realized).c_str());
+                            ImGui::TableNextColumn();
+                            ImGui::PushID(s.symbol.c_str());
+                            if (ImGui::SmallButton("flatten")) engine->post({Command::Flatten, s.symbol, 0, false});
+                            ImGui::PopID();
+                        }
+                        ImGui::EndTable();
                     }
+                    ImGui::EndTabItem();
                 }
-                ImGui::EndTable();
+                if (ImGui::BeginTabItem("Previous")) {
+                    if (ImGui::BeginTable("pos_prev", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
+                        ImGui::TableSetupColumn("SYMBOL");
+                        ImGui::TableSetupColumn("CLASS");
+                        ImGui::TableSetupColumn("QTY");
+                        ImGui::TableSetupColumn("ENTRY");
+                        ImGui::TableSetupColumn("EXIT");
+                        ImGui::TableSetupColumn("REALIZED");
+                        ImGui::TableHeadersRow();
+                        for (const auto& c : v.closed_positions) {
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+                            if (ImGui::Selectable(c.symbol.c_str(), false, ImGuiSelectableFlags_SpanAllColumns))
+                                select_for_ticket(c.symbol, 0.0, false);
+                            ImGui::PopStyleColor();
+                            ImGui::TableNextColumn();
+                            ImGui::TextDisabled("%s", c.asset_class == AssetClass::Stock ? "STOCK" : "CRYPTO");
+                            ImGui::TableNextColumn(); ImGui::Text("%.6f", c.qty);
+                            ImGui::TableNextColumn(); ImGui::Text("%s", commafy(c.avg_entry).c_str());
+                            ImGui::TableNextColumn(); ImGui::Text("%s", commafy(c.exit_price).c_str());
+                            ImGui::TableNextColumn(); ImGui::TextColored(pnl_color(c.realized_pnl), "%s", signed_money(c.realized_pnl).c_str());
+                        }
+                        ImGui::EndTable();
+                    }
+                    if (v.closed_positions.empty()) ImGui::TextDisabled("no closed positions yet");
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
             }
             ImGui::End();
 
@@ -327,8 +458,11 @@ int main(int argc, char** argv) {
                 ImGui::TextWrapped("%s", it->c_str());
             ImGui::End();
 
-            // --- Ticker Search (browse/search the full product catalog) ---------
+            // --- Ticker Search (crypto catalog only -- Alpaca's free plan has no
+            //     bulk stock catalog endpoint, so stocks use the "+ Add Stock"
+            //     exact-ticker box in Market Watch instead) ----------------------
             ImGui::Begin("Ticker Search");
+            ImGui::TextDisabled("Crypto catalog (Coinbase)");
             static char filter[32] = "";
             ImGui::SetNextItemWidth(-1);
             ImGui::InputTextWithHint("##filter", "search ticker (e.g. SOL)...", filter, sizeof(filter));
