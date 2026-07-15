@@ -153,7 +153,6 @@ int main(int argc, char** argv) {
     float capital_input = 10'000.0f;
     char newsym[32] = "";
     char newstock[32] = "";
-    int sel_sym = 0;
     float order_notional = 1'000.0f;
     bool ticket_use_qty = false;   // Order Ticket mode: $ notional vs exact qty
     float ticket_qty = 0.0f;
@@ -224,24 +223,28 @@ int main(int argc, char** argv) {
             if (!layout_built) { build_default_layout(dockspace_id); layout_built = true; }
             ImGui::End();
 
-            // Symbol names for the Order Ticket combo, built once per frame so
-            // both the Order Ticket and Positions panels (below) can drive it --
-            // clicking a Positions row needs to select into this same list.
+            // The Order Ticket's symbol always mirrors the engine's focused
+            // symbol -- ONE source of truth (`v.focus`) instead of a second,
+            // independently-tracked "which row did I last click" selection.
+            // Every clickable row everywhere (Market Watch, Ticker Search,
+            // Positions) already posts SetFocus, so this alone makes the
+            // ticket follow whatever you're looking at without extra plumbing.
             std::vector<const char*> names;
             for (const auto& s : v.symbols) names.push_back(s.symbol.c_str());
-            if (!names.empty() && sel_sym >= (int)names.size()) sel_sym = 0;
+            int sel_sym = 0;
+            for (int i = 0; i < (int)names.size(); ++i)
+                if (v.focus == names[i]) { sel_sym = i; break; }
 
-            // Point the Order Ticket at `sym`; if `prefill_qty` (clicking an open
-            // position), switch to exact-quantity mode pre-filled with the
-            // position's size so one click sets up either a top-up or an exit.
-            auto select_for_ticket = [&](const std::string& sym, double net_qty, bool prefill_qty) {
-                engine->post({Command::SetFocus, sym, 0, false});
-                for (int i = 0; i < (int)names.size(); ++i)
-                    if (sym == names[i]) { sel_sym = i; break; }
-                if (prefill_qty) {
-                    ticket_use_qty = true;
-                    ticket_qty = (float)std::abs(net_qty);
-                }
+            const SymbolView* focus_view = nullptr;
+            for (const auto& s : v.symbols)
+                if (s.symbol == v.focus) { focus_view = &s; break; }
+
+            // Clicking an open position also switches the ticket to exact-qty
+            // mode pre-filled with that position's size, so one click sets up
+            // either a top-up or a precise exit (still editable before firing).
+            auto prefill_qty_from_position = [&](double net_qty) {
+                ticket_use_qty = true;
+                ticket_qty = (float)std::abs(net_qty);
             };
 
             // --- Market Watch (tabbed: Crypto is live via Coinbase/KDB+, Stocks
@@ -347,8 +350,30 @@ int main(int argc, char** argv) {
             ImGui::Begin("Order Ticket");
             if (!names.empty()) {
                 ImGui::TextColored(kCyan, "Symbol");
-                ImGui::Combo("##sym", &sel_sym, names.data(), (int)names.size());
+                if (ImGui::Combo("##sym", &sel_sym, names.data(), (int)names.size()))
+                    engine->post({Command::SetFocus, names[sel_sym], 0, false});
+                const std::string sym = names[sel_sym];
 
+                // Live context: what does this symbol actually quote right now,
+                // and do I already hold any of it? Answers "what will this cost"
+                // before you commit, instead of finding out from the Event Log.
+                const bool has_quote = focus_view && focus_view->has_quote;
+                const double net_qty = focus_view ? focus_view->net_qty : 0.0;
+                if (has_quote) {
+                    ImGui::TextColored(kCyan, "BID"); ImGui::SameLine();
+                    ImGui::TextColored(kGreen, "%s", commafy(focus_view->bid).c_str()); ImGui::SameLine();
+                    ImGui::TextColored(kCyan, "  ASK"); ImGui::SameLine();
+                    ImGui::TextColored(kRed, "%s", commafy(focus_view->ask).c_str());
+                } else {
+                    ImGui::TextDisabled("no live quote yet for %s", sym.c_str());
+                }
+                if (net_qty != 0.0) {
+                    ImGui::TextColored(kAmber, "Holding %.6f @ avg %s", net_qty, commafy(focus_view->avg_price).c_str());
+                    ImGui::SameLine();
+                    ImGui::TextColored(pnl_color(focus_view->unrealized), "(%s)", signed_money(focus_view->unrealized).c_str());
+                }
+
+                ImGui::Spacing();
                 if (ImGui::RadioButton("$ Notional", !ticket_use_qty)) ticket_use_qty = false;
                 ImGui::SameLine();
                 if (ImGui::RadioButton("Qty", ticket_use_qty)) ticket_use_qty = true;
@@ -362,21 +387,48 @@ int main(int argc, char** argv) {
                     ImGui::InputFloat("##notional", &order_notional, 100.0f, 1000.0f, "%.2f");
                     if (order_notional < 0) order_notional = 0;
                 }
-                const std::string sym = names[sel_sym];
                 const double amount = ticket_use_qty ? (double)ticket_qty : (double)order_notional;
+
+                // A rough (mid-price) preview of the other side of the trade, so
+                // you can sanity-check the size before firing -- the actual fill
+                // crosses the real bid/ask, so this is approximate by design.
+                if (has_quote && amount > 0.0 && focus_view->mid > 0.0) {
+                    if (ticket_use_qty)
+                        ImGui::TextDisabled("~ %s at current mid", commafy(amount * focus_view->mid).c_str());
+                    else
+                        ImGui::TextDisabled("~ %.6f units at current mid", amount / focus_view->mid);
+                }
+
+                const bool can_buy = has_quote && amount > 0.0 && v.cash > 0.0;
+                const bool can_sell = has_quote && amount > 0.0 && net_qty > 1e-9;
+
                 ImGui::Spacing();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.35f, 0.15f, 1.0f));
+                ImGui::BeginDisabled(!can_buy);
                 if (ImGui::Button("BUY", ImVec2(90, 34)))
                     engine->post({Command::Buy, sym, amount, !ticket_use_qty});
+                ImGui::EndDisabled();
                 ImGui::PopStyleColor();
+                if (!can_buy && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", !has_quote ? "no live quote yet" : amount <= 0.0 ? "enter an amount" : "no cash available");
                 ImGui::SameLine();
+
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.40f, 0.12f, 0.12f, 1.0f));
+                ImGui::BeginDisabled(!can_sell);
                 if (ImGui::Button("SELL", ImVec2(90, 34)))
                     engine->post({Command::Sell, sym, amount, !ticket_use_qty});
+                ImGui::EndDisabled();
                 ImGui::PopStyleColor();
+                if (!can_sell && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", !has_quote ? "no live quote yet" : net_qty <= 0.0 ? "no open position to sell" : "enter an amount");
                 ImGui::SameLine();
-                if (ImGui::Button("FLATTEN", ImVec2(90, 34)))
+
+                ImGui::BeginDisabled(net_qty <= 1e-9);
+                if (ImGui::Button("SELL ALL", ImVec2(90, 34)))
                     engine->post({Command::Flatten, sym, 0, false});
+                ImGui::EndDisabled();
+                if (net_qty <= 1e-9 && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("no open position to sell");
             } else {
                 ImGui::TextDisabled("no symbols watched");
             }
@@ -402,8 +454,10 @@ int main(int argc, char** argv) {
                             ImGui::TableNextColumn();
                             ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
                             if (ImGui::Selectable(s.symbol.c_str(), s.symbol == v.focus,
-                                                  ImGuiSelectableFlags_SpanAllColumns))
-                                select_for_ticket(s.symbol, s.net_qty, true);
+                                                  ImGuiSelectableFlags_SpanAllColumns)) {
+                                engine->post({Command::SetFocus, s.symbol, 0, false});
+                                prefill_qty_from_position(s.net_qty);
+                            }
                             ImGui::PopStyleColor();
                             ImGui::TableNextColumn();
                             ImGui::TextDisabled("%s", s.asset_class == AssetClass::Stock ? "STOCK" : "CRYPTO");
@@ -434,7 +488,7 @@ int main(int argc, char** argv) {
                             ImGui::TableNextColumn();
                             ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
                             if (ImGui::Selectable(c.symbol.c_str(), false, ImGuiSelectableFlags_SpanAllColumns))
-                                select_for_ticket(c.symbol, 0.0, false);
+                                engine->post({Command::SetFocus, c.symbol, 0, false});
                             ImGui::PopStyleColor();
                             ImGui::TableNextColumn();
                             ImGui::TextDisabled("%s", c.asset_class == AssetClass::Stock ? "STOCK" : "CRYPTO");
