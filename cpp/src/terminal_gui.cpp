@@ -524,19 +524,34 @@ int main(int argc, char** argv) {
                     ImPlotSpec zs; zs.LineColor = kAmberDim; zs.LineWeight = 1.0f;
                     ImPlot::PlotLine("##zero", zx, zy, 2, zs);
 
-                    // Split the series into profit (green) / loss (red) via NaN masking.
-                    static std::vector<double> up, down;
-                    up.assign(n, NAN);
-                    down.assign(n, NAN);
+                    // Split the series into profit (green) / loss (red). A sample
+                    // landing exactly on zero lands in both arrays and stitches them
+                    // together, but back-to-back samples that jump straight from
+                    // positive to negative (or vice versa) share no such point --
+                    // that gap is what read as a broken line. Fix: whenever
+                    // consecutive samples change sign, linearly interpolate the
+                    // fractional x where the value actually crosses zero and insert
+                    // that point into both series, so each line always terminates
+                    // exactly at the true crossing instead of stopping short.
+                    static std::vector<double> xs_up, ys_up, xs_down, ys_down;
+                    xs_up.clear(); ys_up.clear(); xs_down.clear(); ys_down.clear();
                     for (int i = 0; i < n; ++i) {
                         double y = v.pnl_history[i];
-                        if (y >= 0) up[i] = y;
-                        if (y <= 0) down[i] = y;  // boundary in both so segments join at zero
+                        if (y >= 0) { xs_up.push_back((double)i); ys_up.push_back(y); }
+                        if (y <= 0) { xs_down.push_back((double)i); ys_down.push_back(y); }
+                        if (i + 1 < n) {
+                            double y2 = v.pnl_history[i + 1];
+                            if ((y > 0 && y2 < 0) || (y < 0 && y2 > 0)) {
+                                double xc = i + y / (y - y2);  // fraction where the line hits 0
+                                xs_up.push_back(xc);   ys_up.push_back(0.0);
+                                xs_down.push_back(xc); ys_down.push_back(0.0);
+                            }
+                        }
                     }
                     ImPlotSpec gs; gs.LineColor = kGreen; gs.LineWeight = 1.6f;
                     ImPlotSpec rs; rs.LineColor = kRed;   rs.LineWeight = 1.6f;
-                    ImPlot::PlotLine("profit", up.data(), n, 1.0, 0.0, gs);
-                    ImPlot::PlotLine("loss", down.data(), n, 1.0, 0.0, rs);
+                    ImPlot::PlotLine("profit", xs_up.data(), ys_up.data(), (int)xs_up.size(), gs);
+                    ImPlot::PlotLine("loss", xs_down.data(), ys_down.data(), (int)xs_down.size(), rs);
                     ImPlot::EndPlot();
                 }
                 ImGui::TextColored(pnl_color(v.total_pnl), "  now: %s", signed_money(v.total_pnl).c_str());

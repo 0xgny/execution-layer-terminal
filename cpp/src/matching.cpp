@@ -7,9 +7,11 @@ std::vector<Fill> PaperMatchingEngine::fill(const Order& order, const Quote& mar
     const double qty = order.leaves();
     if (!(qty > 0.0)) return fills;
 
-    // Price we would trade at if crossing the spread now.
-    const double touch = order.side == Side::Buy ? market.ask : market.bid;
-    if (!(touch > 0.0)) return fills;  // no book -> no fill
+    // Price we would trade at if crossing the spread now. Falls back to the
+    // other side's real quote (see Quote::touch) rather than blocking the
+    // fill outright when a single-venue feed shows a momentarily one-sided book.
+    const double touch = market.touch(order.side);
+    if (!(touch > 0.0)) return fills;  // truly no quote at all -> no fill
 
     if (order.type == OrderType::Limit) {
         // Only fill if the limit is marketable against the touch.

@@ -148,7 +148,7 @@ void TradingEngine::process(const Command& c) {
     }
 
     const Side side = c.type == Command::Buy ? Side::Buy : Side::Sell;
-    const double ref = side == Side::Buy ? q.ask : q.bid;
+    const double ref = q.touch(side);
     double qty = c.use_notional ? (ref > 0 ? c.amount / ref : 0.0) : c.amount;
     if (!(qty > 0.0)) { log("bad order qty for " + c.symbol); return; }
 

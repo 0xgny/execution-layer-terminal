@@ -33,8 +33,7 @@ bool OrderManager::transition(Order& o, OrderStatus to) {
 
 double OrderManager::reference_price(const Order& o, const Quote& market) const {
     if (o.type == OrderType::Limit && o.limit_price > 0.0) return o.limit_price;
-    double ref = o.side == Side::Buy ? market.ask : market.bid;
-    return ref > 0.0 ? ref : market.mid();
+    return market.touch(o.side);
 }
 
 std::optional<OrderId> OrderManager::submit(const Signal& sig, const Quote& market) {

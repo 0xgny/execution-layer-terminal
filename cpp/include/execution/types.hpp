@@ -63,6 +63,21 @@ struct Quote {
 
     double mid() const { return 0.5 * (bid + ask); }
     double spread() const { return ask - bid; }
+
+    // Best available reference/fill price for an order on `side`. A deep,
+    // continuously-quoted book (Coinbase crypto) always has both sides
+    // populated, so `ask`/`bid` alone was fine there -- but a single-venue
+    // feed like Alpaca/IEX can legitimately show a real bid with a momentarily
+    // empty ask (or vice versa), which used to silently block both notional
+    // sizing and paper fills. Fall back to the other side's real quote before
+    // ever falling back to mid() (a synthetic average, one leg of which may be
+    // the exact zero we're trying to avoid).
+    double touch(Side side) const {
+        const double primary = (side == Side::Buy) ? ask : bid;
+        if (primary > 0.0) return primary;
+        const double secondary = (side == Side::Buy) ? bid : ask;
+        return secondary > 0.0 ? secondary : mid();
+    }
 };
 
 // A trade intention emitted by a Strategy (or, later, read from the KDB+
