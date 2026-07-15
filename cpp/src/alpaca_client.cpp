@@ -33,7 +33,10 @@ std::string start_date_iso(int n_days_back) {
     std::time_t t = std::time(nullptr) - static_cast<std::time_t>(n_days_back) * 86400;
     std::tm tm{};
     gmtime_r(&t, &tm);
-    char buf[16];
+    // GCC's -Wformat-truncation can't prove tm_year won't be some huge value
+    // (it theoretically can, per struct tm's contract), so size generously
+    // rather than exactly -- this is always a real calendar date in practice.
+    char buf[32];
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
     return buf;
 }

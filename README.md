@@ -136,10 +136,10 @@ arguments: `./build/terminal <rdb-host> <rdb-port>` (default `127.0.0.1 5011`).
 4. In the Order Ticket, pick a symbol, choose `$` notional or exact `Qty`, and
    BUY / SELL.
 5. Watch the price chart and the PnL chart (green in profit, red in loss).
-6. Close a position with FLATTEN (in the ticket or per-row in Positions >
-   Current). It then moves to Positions > Previous with its entry/exit/realized
-   PnL. Click any Current position to jump to the Order Ticket pre-filled at
-   its exact size, to top up or exit precisely.
+6. Close a position with SELL ALL (in the ticket or per-row "flatten" in
+   Positions > Current). It then moves to Positions > Previous with its
+   entry/exit/realized PnL. Click any Current position to jump to the Order
+   Ticket pre-filled at its exact size, to top up or exit precisely.
 
 To stop: Ctrl-C in terminal 1 (it tears down the q processes).
 
@@ -182,6 +182,14 @@ execution-layer/
     README.md              terminal design + build detail
   scripts/run_stack.sh     launch tp + rdb + feedhandler together
   docs/                    design docs and decision records
+  web-version/             a separate, SELF-CONTAINED project (hosted,
+                            multi-user React + C++ backend version -- see
+                            web-version/README.md and web-version/design.md).
+                            It started as a companion sharing this repo's
+                            kdb/, feedhandler/, and cpp/'s trading core, but
+                            now copies the trading core in and connects to
+                            Coinbase directly (no KDB+/feedhandler at all),
+                            specifically so it can move to its own repo.
 ```
 
 ---

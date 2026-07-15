@@ -104,9 +104,13 @@ On launch, enter your initial capital, hit START DESK, and you get a tiled desk:
   the control plane subscribes the feed to it live and charts it
 - Price Chart (ImPlot) -- live last-trade price of the focused symbol (amber)
 - PnL (ImPlot) -- account PnL over time; green while in profit, red while in loss
-- Order Ticket -- pick a symbol, `$` notional or exact `Qty` mode, BUY / SELL /
-  FLATTEN. Clicking an open position (below) jumps here pre-filled at that
-  position's exact size so you can top up or exit in one motion.
+- Order Ticket -- pick a symbol (always mirrors whatever's focused elsewhere
+  -- Market Watch, Ticker Search, Positions), `$` notional or exact `Qty`
+  mode, BUY / SELL / **SELL ALL**. Live bid/ask and your current holding (if
+  any) show before you commit; buttons gray out with a tooltip explaining
+  why instead of silently rejecting. Clicking an open position (below) jumps
+  here pre-filled at that position's exact size so you can top up or exit in
+  one motion.
 - Positions -- tabbed **Current** (open positions, live unrealized PnL,
   click-to-ticket, per-row flatten) and **Previous** (closed round trips: entry,
   exit, realized PnL) -- a position moves from Current to Previous the moment it

@@ -18,6 +18,7 @@ Contents:
    5.4 KdbClient (C++ IPC)
    5.5 TradingEngine (C++ threaded core)
    5.6 The terminal GUI (C++ / ImGui / ImPlot)
+   5.7 AlpacaClient + StockFeed (C++ stock market data)
 6. The q IPC protocol, byte by byte
 7. The control plane (catalog, universe, dynamic subscription)
 8. Execution logic (OMS state machine, risk, matching, portfolio and PnL)
@@ -28,6 +29,7 @@ Contents:
 13. Performance characteristics
 14. File-by-file reference
 15. How to extend the system
+16. The web version (a separate, self-contained project)
 
 ---
 
@@ -185,6 +187,17 @@ load). A ~250-line protocol client is portable, dependency-free, and was verifie
 byte-for-byte against a live q. This is the single most unusual engineering
 decision in the project and it is what makes the C++ side clean.
 
+### libcurl + nlohmann/json (stock market data)
+
+Stocks are a second, independent asset class layered on later (Section 5.7):
+`AlpacaClient` is a small libcurl-based REST client against Alpaca's free
+"Basic" market-data plan (real IEX-venue real-time quotes + historical daily
+bars), and `nlohmann/json` (single-header, vendored like Dear ImGui) parses
+the responses. Unlike the q IPC protocol, there was no reason to hand-roll a
+JSON parser -- Alpaca's REST responses are genuinely general-purpose JSON,
+not a small fixed binary protocol, so a well-established library was the
+right call rather than another from-scratch parser.
+
 ---
 
 ## 4. The data model
@@ -271,6 +284,22 @@ On the C++ side the same concepts appear as plain structs the whole terminal
 shares: `Quote`, `Signal` (a trade intention), `Order`, `Fill`, and `Position`.
 `Position` carries the PnL math (see Section 8). These have no dependencies so the
 OMS, risk manager, matching engine, and GUI all speak in terms of them.
+
+`AssetClass` (`Crypto` or `Stock`) was added when stocks became a second
+data source (Section 5.7); `Quote` carries one so a row's origin is known
+even before the OMS/risk/matching code -- which stays fully asset-agnostic --
+ever looks at it. `Quote::touch(side)` was added alongside it: a deep,
+continuously-quoted book (Coinbase) always has both a bid and an ask, but a
+single-venue feed like Alpaca/IEX can legitimately show a real bid with a
+momentarily empty ask. Before `touch()` existed, three separate call sites
+(notional-to-quantity sizing in the engine, the OMS's buying-power
+reference price, and the paper matching engine's fill price) each computed
+`side == Buy ? ask : bid` with no fallback, so a one-sided IEX quote would
+silently block both order sizing and fills for that symbol -- crypto never
+exercised this path since Coinbase's book is essentially always two-sided.
+`touch()` centralizes the fix: try the correct side, fall back to the
+other side's real quote, and only fall back to a synthetic mid if there is
+truly no data at all.
 
 ---
 
@@ -416,20 +445,33 @@ the engine thread ever calls it.
 and runs it on **one background thread**, so KDB+ client state (which is not
 thread-safe) lives on exactly one thread and the GUI never blocks on IPC.
 
-It holds **two** `KdbClient`s:
+It holds **two** `KdbClient`s and (since stocks were added, Section 5.7) one
+`StockFeed`:
 
 - `kdb_` connects to the RDB (5011) for `snap` and `hist`.
 - `ctrl_` connects to the tickerplant (5010) for the control plane (`add_symbol`,
   `products`, `universe`).
+- `stocks_` polls Alpaca for whatever stock tickers have been added, on its
+  own background thread (never the engine thread -- HTTP round-trips are far
+  too slow for the 30ms crypto loop below).
 
 Plus a `Portfolio`, a `RiskManager`, a `PaperMatchingEngine`, an `OrderManager`,
-the latest quote per symbol, the focused symbol for the chart, cached product and
-price-history lists, and ring buffers of PnL and equity over time.
+the latest quote per symbol (crypto and stock merged into one `quotes_` map --
+the OMS/matching engine reading it never needs to know which asset class a
+symbol belongs to), the focused symbol for the chart, cached product and
+price-history lists, ring buffers of PnL and equity over time, and now two
+parallel watch lists: `symbols_` (crypto) and `stock_symbols_` (stock) --
+kept separate because `AddSymbol` routes very differently for each (crypto
+goes through the tickerplant's control plane; stock just calls
+`stocks_.watch()`), and because a symbol's asset class needs to be known
+before a `Quote` for it necessarily exists yet (e.g. to route chart-history
+fetches, or to render it under the right Market Watch tab).
 
 The GUI talks to the engine through two thread-safe channels:
 
 - **Commands** (`post(Command)`): the GUI enqueues `Buy / Sell / Flatten /
-  AddSymbol / SetFocus / Kill` under a mutex.
+  AddSymbol / SetFocus / Kill` under a mutex. `AddSymbol` (and every
+  `SymbolView`/`ClosedPositionView`) now also carries an `AssetClass`.
 - **View** (`view()`): the engine republishes an immutable `EngineView` snapshot
   each cycle under a mutex; the GUI copies it out each frame.
 
@@ -437,18 +479,25 @@ The background loop (`run`), ~33 times per second:
 
 1. Drains the command queue and processes each command.
 2. Reconnects `kdb_` / `ctrl_` if either dropped.
-3. Polls `snap[symbols_]` and updates the quote cache.
-4. Periodically (every ~0.5 s) refreshes `hist[focus_]`; periodically (~2 s)
-   refreshes the catalog and merges the tickerplant's `universe` into the watch
-   list (so the terminal auto-populates with whatever the feed streams).
+3. Polls `snap[symbols_]` (crypto) and merges in `stocks_.snapshot()`
+   (stock, a cheap mutex copy -- the actual HTTP calls already happened on
+   `StockFeed`'s own thread) into the shared quote cache.
+4. Periodically (every ~0.5 s) refreshes `hist[focus_]` for a crypto focus,
+   or reads `stocks_.history(focus_)` for a stock focus; periodically (~2 s)
+   refreshes the catalog and merges the tickerplant's `universe` into the
+   crypto watch list (so the terminal auto-populates with whatever the feed
+   streams).
 5. Samples total PnL and equity into ring buffers.
 6. Publishes a fresh `EngineView`.
 7. Sleeps 30 ms.
 
-`process(Command)` maps a GUI action to engine work: `AddSymbol` adds to the watch
-list, tells the tickerplant to stream it, and focuses the chart on it; `Buy`/`Sell`
-compute a quantity from a dollar notional at the current touch and submit an order
-through the OMS; `Flatten` closes a position; `Kill` trips the risk kill switch.
+`process(Command)` maps a GUI action to engine work: `AddSymbol` branches on
+`AssetClass` -- crypto adds to `symbols_` and tells the tickerplant to stream
+it; stock adds to `stock_symbols_` and tells `stocks_` to start polling it --
+either way it focuses the chart on the new ticker; `Buy`/`Sell` compute a
+quantity from a dollar notional (or use an exact quantity, see Section 5.6)
+at `Quote::touch()` (Section 4) and submit an order through the OMS;
+`Flatten` closes a position; `Kill` trips the risk kill switch.
 
 ### 5.6 The terminal GUI (C++ / ImGui / ImPlot)
 
@@ -464,25 +513,90 @@ Each frame:
 3. Otherwise copy an `EngineView` snapshot and draw the docked panels:
    - **Account bar** (a menu bar): status (LIVE/DISCONNECTED), cash, equity, PnL,
      and a KILL button.
-   - **Market Watch**: a table of watched symbols with live bid/ask/mid/spread;
-     each row is selectable and focuses the chart.
-   - **Ticker Search**: a filter box over the full product catalog; clicking a
-     product posts `AddSymbol`.
+   - **Market Watch**: tabbed **Crypto** / **Stocks** (added with stocks,
+     Section 5.7) -- two differently-sourced, differently-fresh feeds kept
+     visually separate rather than mixed into one growing table. Each tab
+     has its own "+ Watch" / "+ Add Stock" exact-ticker box (Alpaca's free
+     plan has no bulk catalog to browse, unlike Coinbase's) and a live
+     bid/ask/mid table; a row click posts `SetFocus`.
+   - **Ticker Search**: a filter box over the full crypto product catalog;
+     clicking a product posts `AddSymbol`.
    - **Price Chart** (ImPlot): the focused symbol's last-trade prices, amber, with
      ~15% vertical headroom so the line never hugs the window edge.
    - **PnL** (ImPlot): account PnL over time, drawn as two NaN-masked series so it
      is green above zero and red below, with symmetric Y limits (zero centered)
-     and a zero reference line.
-   - **Order Ticket**: symbol selector, dollar amount, BUY / SELL / FLATTEN.
-   - **Positions**: open positions with live unrealized PnL and per-row flatten.
+     and a zero reference line. The NaN-mask split only stitches the two
+     colored segments together at a sample that lands exactly on zero; a
+     fast swing that jumps from positive to negative *between* two samples
+     left a visible gap in the line (found via user report, not inspection).
+     Fixed by linearly interpolating the fractional x-position where the
+     value actually crosses zero and inserting that point into both series,
+     so each line now always terminates exactly at the true crossing.
+   - **Order Ticket**: the symbol combo mirrors `EngineView.focus` (one
+     source of truth -- previously the ticket tracked its own selection
+     independently of what was focused elsewhere, so clicking a Market Watch
+     row updated the chart but left the ticket pointed at whatever you'd
+     picked before; now every focus-changing click anywhere updates the
+     ticket too). Shows live bid/ask and, if held, the current position with
+     unrealized PnL, plus a `$` **Notional** / **Qty** mode toggle and a
+     rough mid-price size preview. BUY / SELL / **SELL ALL** (renamed from
+     FLATTEN for plainer language) gray out with a tooltip explaining why
+     (no quote yet, no cash, no position to sell) instead of silently
+     rejecting and only logging it.
+   - **Positions**: tabbed **Current** (open positions, live unrealized PnL,
+     click a row to load it into the Order Ticket in Qty mode pre-filled at
+     that exact size, per-row flatten) / **Previous** (closed round trips --
+     entry, exit, realized PnL). A position moves from Current to Previous
+     the instant it nets back to flat; see Section 8's `ClosedPosition` for
+     how `Portfolio` detects that transition.
    - **Event Log**: fills, rejects, connection events.
 4. The default docked layout is built once with ImGui's DockBuilder (left:
    watch/search; center: price chart over PnL; right: ticket over positions/log).
+   The tabs above live *inside* existing panels rather than changing this
+   grid -- adding a second asset class this way avoided needing to redesign
+   the docked layout itself.
 5. Render the ImGui draw data through OpenGL and swap buffers (vsync, ~60 fps).
 
 Numbers are formatted with thousands separators (`commafy`) and PnL values with an
 explicit sign (`signed_money`). The GUI never touches trading state directly -- it
 reads the snapshot and posts commands.
+
+### 5.7 AlpacaClient + StockFeed (C++ stock market data)
+
+Stocks were added as a second, independently-sourced asset class after the
+crypto-only version above was already working. Two small classes, both in
+`cpp/include/execution/`:
+
+**AlpacaClient** (`alpaca_client.hpp`/`.cpp`) -- a libcurl-based REST client
+against Alpaca's free "Basic" market-data plan. `latest_quote(symbol)` GETs
+`/v2/stocks/{symbol}/quotes/latest`; `daily_bars(symbol, n)` GETs
+`/v2/stocks/{symbol}/bars`. Two real API gotchas were found and fixed
+empirically (not documented clearly by Alpaca, discovered by testing against
+the live API and inspecting the actual bytes back):
+
+- **`feed=iex` must be passed explicitly on every request.** Omitting it
+  defaults to the consolidated SIP feed, which free/Basic accounts don't
+  have access to -- a 403, not an empty response, so it's easy to misread as
+  an auth problem rather than a missing query parameter.
+- **`start` must be passed explicitly on the bars endpoint.** Omitting it
+  defaults to *today*, silently returning a single (possibly incomplete)
+  bar instead of a history window -- the price chart requires >= 2 points to
+  render, so this manifested as the chart perpetually showing "waiting for
+  trades..." with no error anywhere. Fixed by computing an explicit `start`
+  date generously far back (`n * 2 + 30` calendar days, to comfortably cover
+  `n` trading days past weekends/holidays) via `start_date_iso()`.
+
+**StockFeed** (`stock_feed.hpp`/`.cpp`) -- owns a background thread separate
+from both the engine thread and the crypto `KdbClient`s, because an HTTP
+round-trip (tens to hundreds of ms) would stall the engine's 30ms loop (and
+therefore crypto polling too) if done inline. Refreshes each watched
+symbol's quote at most once every 10 seconds, round-robin, keeping steady-
+state load at `symbols / 10` requests/second -- comfortably under Alpaca's
+200 requests/minute free-tier limit even with dozens of symbols watched.
+Refetches daily bars every 5 minutes (they're daily granularity; no need to
+hammer this). `watch()`/`snapshot()`/`history()`/`errors()` are all
+documented thread-safe, so `TradingEngine` calls them directly from its own
+thread without any extra locking on the engine side.
 
 ---
 
@@ -659,6 +773,21 @@ Worked example: fund 10,000. BTC ask 62,000; buy 3,000 notional -> qty
 unrealized = (62,500 - 62,000) * 0.048387 = +24.19, equity 10,024.19. Flatten at
 bid 62,500 -> realized +24.19, cash 10,024.19, position flat.
 
+**`ClosedPosition` history (added for the Positions > Previous split,
+Section 5.6).** `positions_` (the `map<symbol, Position>`) never removes an
+entry once created -- `net_qty` resets to 0 but the map entry, and its
+lifetime `realized_pnl`, persist forever, including across multiple
+open/close round trips on the same symbol. That means the raw map alone
+can't distinguish "currently flat, previously traded" from "never opened,"
+which is exactly what a Current/Previous UI split needs to know.
+`Portfolio::apply(Fill)` now snapshots `net_qty`/`realized_pnl` immediately
+before and after calling `Position::apply`; if the position was nonzero and
+is now exactly zero, it pushes a `ClosedPosition{symbol, qty, avg_entry,
+exit_price, realized_pnl of just this round trip, timestamp}` onto a
+`vector<ClosedPosition>`. This fires uniformly whether the close came from
+a FLATTEN/SELL ALL, a per-row flatten, or a manual sell that happens to zero
+the position exactly -- no OMS changes were needed, only `Portfolio`.
+
 ---
 
 ## 9. Concurrency and thread-safety
@@ -793,6 +922,32 @@ about.
   connections and keeps a single source of truth.
 - **Long-only spot.** Matches Coinbase spot and keeps the accounting simple.
   Shorting/margin is an easy future relaxation.
+- **Alpaca over Alpha Vantage for stocks.** The original plan was Alpha
+  Vantage (previous-day close only, 25 requests/day free). Compared against
+  Alpaca's free "Basic" plan -- real IEX-venue real-time quotes + historical
+  daily bars, 200 requests/minute -- and switched before writing any stock
+  code. This removed the originally-planned "yesterday = today" UI framing
+  entirely: stocks get genuinely live (single-venue) data, not stale data,
+  for the same zero cost.
+- **`StockFeed` on its own thread, not folded into the engine loop.** An
+  HTTP round-trip is one to two orders of magnitude slower than a q IPC
+  round-trip on localhost. Polling Alpaca inline on the engine's 30ms loop
+  would have stalled crypto polling too every time a stock quote was due for
+  a refresh. A second background thread, rate-limited independently,
+  isolates that latency completely -- the engine loop only ever does a cheap
+  mutex-guarded cache copy for stocks, never an HTTP call.
+- **A Makefile bug found by a heap-corruption crash.** The build had no
+  header-dependency tracking (`-MMD -MP`), so `make` only recompiled a
+  `.cpp` when *it* changed, not when a header it included changed. Editing
+  `engine.hpp` to add `AssetClass` to `SymbolView` without a full `make
+  clean` linked a stale `.o` (old struct layout) against fresh ones (new
+  layout) -- different translation units disagreeing about a struct's size,
+  undefined behavior, manifesting as a `malloc`-detected heap corruption on
+  the *second* frame of a headless test. Fixed by adding `-MMD -MP` to the
+  build and `-include`ing the generated `.d` files, which is the standard
+  fix and should have been there from the start; flagged here because it's
+  exactly the kind of bug that looks like a logic error in application code
+  but is actually a build-system correctness gap.
 
 ---
 
@@ -831,23 +986,30 @@ feedhandler/
 
 cpp/
   include/execution/
-    types.hpp        Side/Order/Fill/Signal/Quote/Position (+ PnL math)
-    portfolio.hpp    cash + positions + equity/PnL accounting
-    risk.hpp         RiskManager: limits + kill switch
-    matching.hpp     PaperMatchingEngine: fills vs top-of-book
-    oms.hpp          OrderManager: state machine + gates + routing
-    kdb_client.hpp   pure-socket q IPC client
-    engine.hpp       TradingEngine: threaded desk, EngineView, Command
+    types.hpp          Side/Order/Fill/Signal/Quote/Position/AssetClass (+ PnL math, Quote::touch)
+    portfolio.hpp      cash + positions + ClosedPosition history + equity/PnL accounting
+    risk.hpp           RiskManager: limits + kill switch
+    matching.hpp       PaperMatchingEngine: fills vs top-of-book
+    oms.hpp            OrderManager: state machine + gates + routing
+    kdb_client.hpp     pure-socket q IPC client (crypto)
+    alpaca_client.hpp  libcurl REST client: Alpaca quotes + daily bars (stocks)
+    stock_feed.hpp     background poller wrapping AlpacaClient, own thread
+    engine.hpp         TradingEngine: threaded desk, EngineView, Command
   src/
-    risk.cpp / matching.cpp / oms.cpp / kdb_client.cpp / engine.cpp
+    risk.cpp / matching.cpp / oms.cpp / kdb_client.cpp / alpaca_client.cpp /
+    stock_feed.cpp / engine.cpp
     terminal_gui.cpp   ImGui/ImPlot terminal (window, panels, charts)
     selftest.cpp       headless: single-threaded live buy / PnL / flatten
     engine_test.cpp    headless: threaded engine + command/view handoff
-  Makefile           make (headless) / make gui / make run-selftest
-  third_party/       vendored imgui (docking) + implot (fetched by setup)
+    alpaca_test.cpp    headless: Alpaca auth + quote/bars parsing smoke test
+  Makefile             make (headless) / make gui / make alpaca-test (-MMD -MP
+                        header-dependency tracking -- see Section 12)
+  third_party/         vendored imgui (docking) + implot + json (fetched by setup)
 
 scripts/run_stack.sh   launch tp + rdb + feedhandler together
 docs/                  architecture.md, phase-1-feedhandler.md, decisions/
+web-version/           a separate, self-contained project (React + C++
+                        backend, multi-user) -- see Section 16
 README.md              overview + run process
 design.md              this document
 ```
@@ -864,10 +1026,68 @@ design.md              this document
   `Signal`s into `OrderManager::submit` for a rules- or model-driven strategy.
 - **Add historical charts.** Backfill Coinbase REST candles into a `bar` table and
   extend `hist` (or add an `ohlc` query) so a chart has shape the instant a ticker
-  opens; render candles with ImPlot.
+  opens; render candles with ImPlot. `AlpacaClient::daily_bars` already fetches
+  OHLC for stocks (Section 5.7) but only the close price is plotted today --
+  wiring the full OHLC through and switching the Price Chart to a candlestick
+  plot for a stock focus is a smaller version of the same task.
 - **Persist ticks.** Add an end-of-day flush from the RDB to a partitioned on-disk
   HDB, so history survives restarts and the analysis engine can train on it.
 - **Route real orders.** Implement an exchange-router that satisfies the same
   `fill` contract as `PaperMatchingEngine`, placed behind the existing risk gate,
   and start against an exchange testnet.
-```
+- **Add a second asset class.** Follow `alpaca_client.hpp`/`stock_feed.hpp`'s
+  shape: a small REST (or IPC) client, a background poller with its own
+  thread and rate-limit-aware refresh cadence, a thread-safe
+  `watch()`/`snapshot()`/`history()` surface, and a merge point in
+  `TradingEngine`'s quote cache. `AssetClass` already has room for a third
+  value; the OMS/risk/matching code never needs to change since it only ever
+  sees a `Quote`.
+
+---
+
+## 16. The web version (a separate, self-contained project)
+
+`web-version/` began as a companion project in this same repository: a
+hosted, multi-user React + C++ backend build reusing this desktop terminal's
+trading core (`Portfolio`/`RiskManager`/`PaperMatchingEngine`/
+`OrderManager`/`KdbClient`/`AlpacaClient`/`StockFeed`) behind a WebSocket
+instead of ImGui, with per-visitor isolated paper accounts sharing one
+market-data feed. It has since been made **fully self-contained** -- it no
+longer reads, builds, or copies anything from outside its own directory
+tree, specifically so it can be relocated to its own path or extracted into
+its own git repository without carrying this repo along with it.
+
+Concretely, that meant:
+
+- `web-version/backend/include/execution/*.hpp` and
+  `web-version/backend/src/*.cpp` are now this repo's `cpp/include/execution/`
+  and `cpp/src/*.cpp` files **copied**, not referenced by relative path.
+  This is a deliberate tradeoff, not an oversight: a fix made to
+  `Quote::touch()` or `Portfolio`'s `ClosedPosition` tracking in one tree
+  does not automatically appear in the other anymore. If both trees are
+  actively maintained from a shared origin and this starts to hurt, the
+  natural next step is extracting the trading core into a small versioned
+  package (or git submodule) both depend on explicitly, rather than either
+  hand-copying files or reaching across a relative path that assumes a
+  particular checkout layout.
+
+That copy-in was the first step toward independence; the second was
+removing a dependency outright rather than copying it. `web-version/`
+initially also copied in `kdb/` and `feedhandler/` (this repo's KDB+
+tickerplant/RDB and Python ingestion) so its Docker Compose stack could
+build standalone. On reflection, that pipeline was only ever doing two
+things for the web backend -- cache the latest quote per symbol, keep a
+short rolling trade-price history -- which don't need a time-series
+database at that project's data volume. `web-version/backend` now connects
+to Coinbase directly over a WebSocket it opens itself (`CoinbaseFeed`,
+replacing `KdbClient` there), and `web-version/kdb/`+`web-version/
+feedhandler/` are gone -- its Docker Compose stack is down to two services
+(backend, frontend) with no proprietary license to obtain. This desktop
+terminal's own KDB+ pipeline is unaffected -- crypto's live feed here still
+has the future "push compute to the data" analytics use case (Section 3's
+KDB+ discussion, Section 5) in mind, which `web-version` doesn't need.
+
+See `web-version/design.md` for that project's own complete architecture
+writeup (written to stand alone, the same way this document doesn't assume
+`web-version/` exists, and including the full reasoning for dropping KDB+)
+and `web-version/README.md` for setup/run instructions.
