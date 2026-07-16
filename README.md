@@ -44,9 +44,8 @@ round-trip never stalls crypto polling or the GUI. Swapping either data source
 is isolated to one class (`BaseFeedHandler` subclass for crypto venues,
 `AlpacaClient`/`StockFeed` for stocks).
 
-For a complete, detailed walkthrough of the architecture, frameworks, the q IPC
-protocol, the threading model, and traced end-to-end workflows, see `design.md`.
-`docs/architecture.md` covers the higher-level design and roadmap.
+For the system design -- component map, data flow, the q IPC protocol, the
+threading model, and what is built vs. planned -- see `architecture.md`.
 
 ---
 
@@ -181,15 +180,7 @@ execution-layer/
     Makefile               build (make gui / make all / make alpaca-test)
     README.md              terminal design + build detail
   scripts/run_stack.sh     launch tp + rdb + feedhandler together
-  docs/                    design docs and decision records
-  web-version/             a separate, SELF-CONTAINED project (hosted,
-                            multi-user React + C++ backend version -- see
-                            web-version/README.md and web-version/design.md).
-                            It started as a companion sharing this repo's
-                            kdb/, feedhandler/, and cpp/'s trading core, but
-                            now copies the trading core in and connects to
-                            Coinbase directly (no KDB+/feedhandler at all),
-                            specifically so it can move to its own repo.
+  architecture.md          system design, data flow, and rationale
 ```
 
 ---

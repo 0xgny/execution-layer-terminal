@@ -8,7 +8,7 @@
 / The tickerplant does NO analytics and NO storage of its own. Its only jobs
 / are (1) route messages and (2) -- in a production system -- write a replay log
 / for disaster recovery. The replay log is intentionally omitted here and left
-/ as a documented next step (see docs/architecture.md).
+/ as a documented next step (see architecture.md).
 / .
 
 / Launch:  q kdb/tp.q   (listens on port 5010)

@@ -2,7 +2,7 @@
 
 Uses Binance's public combined WebSocket stream. No API key is required for
 market data (this is the single biggest reason we start with Binance -- see
-docs/decisions/0001-exchange-choice.md).
+architecture.md).
 
 Streams consumed per symbol:
   * ``<sym>@trade``      -> individual trades            -> our `trade` table

@@ -7,7 +7,7 @@
 
 / There is currently NO end-of-day flush to a partitioned on-disk HDB; data
 / lives only for the life of this process. Persisting to an HDB is the next
-/ planned phase (see docs/architecture.md, "Roadmap").
+/ planned phase (see architecture.md).
 / .
 
 / Launch:  q kdb/rdb.q   (listens on 5011, connects out to the tp on 5010)

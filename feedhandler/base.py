@@ -9,7 +9,7 @@ Responsibilities that live here (so subclasses don't repeat them):
 A concrete subclass only implements :meth:`_run`, whose job is to read from its
 exchange and call :meth:`emit_trade` / :meth:`emit_quote` with normalized ticks.
 This is the abstraction that lets us add Coinbase later as a sibling class
-without touching anything downstream -- see docs/decisions/0001-exchange-choice.md
+without touching anything downstream -- see architecture.md
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ Uses Coinbase's public Exchange WebSocket feed (``ws-feed.exchange.coinbase.com`
 The ``matches`` and ``ticker`` channels are public and require no authentication,
 which keeps this a drop-in sibling of the Binance handler. (The ``level2`` /
 order-book channels require a signed JWT -- deliberately out of scope here; see
-docs/decisions/0001-exchange-choice.md.)
+architecture.md.)
 
 Symbol format note: Coinbase product ids are dash-separated quote pairs, e.g.
 ``BTC-USD`` / ``ETH-USD`` -- NOT Binance's ``BTCUSDT``. Pass venue-native symbols:

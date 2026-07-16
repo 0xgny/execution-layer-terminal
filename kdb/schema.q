@@ -27,7 +27,7 @@
 
 /   * `exch` (symbol) tags every row with its source exchange, because the
 /     feedhandler is designed to multiplex several venues (Binance now,
-/     Coinbase later) into one store. See docs/decisions/0001-exchange-choice.md
+/     Coinbase later) into one store. See architecture.md
 / .
 
 /   * `side` (char) on trades records the AGGRESSOR side:
