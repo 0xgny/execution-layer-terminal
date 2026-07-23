@@ -11,5 +11,3 @@ cpp/build/
 cpp/third_party/imgui/
 cpp/third_party/implot/
 cpp/third_party/json/
-# Web version (React + C++ backend) -- self-contained, has its own
-# web-version/.gitignore so it stays correct once split into its own repo.
