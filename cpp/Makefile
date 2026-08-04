@@ -7,8 +7,8 @@
 #   make alpaca-test     build + run the Alpaca stock-data smoke test
 #   make clean
 #
-# The KDB+ client talks to the RDB over plain sockets (a small q IPC client);
-# `selftest` needs nothing beyond the system compiler. `engine_test` and `gui`
+# `selftest` is a self-contained offline check and needs nothing beyond the
+# system compiler. `engine_test` and `gui`
 # additionally pull in AlpacaClient (stock market data), which needs libcurl
 # (system-provided on macOS/Linux) and the vendored nlohmann/json single header
 # (see README). The GUI further needs GLFW (brew) and vendored Dear ImGui +
@@ -23,7 +23,8 @@ BUILD    := build
 CURL_LDFLAGS := -lcurl
 
 CORE   := $(BUILD)/oms.o $(BUILD)/risk.o $(BUILD)/matching.o
-ENGINE := $(BUILD)/engine.o $(BUILD)/kdb_client.o $(BUILD)/alpaca_client.o $(BUILD)/stock_feed.o
+ENGINE := $(BUILD)/engine.o $(BUILD)/market_store.o $(BUILD)/feed_server.o \
+          $(BUILD)/alpaca_client.o $(BUILD)/stock_feed.o
 
 # --- GUI (Dear ImGui + ImPlot + GLFW) --------------------------------------
 IMGUI_DIR    := third_party/imgui
@@ -40,7 +41,7 @@ EXT_OBJ := $(BUILD)/ext/imgui.o $(BUILD)/ext/imgui_draw.o $(BUILD)/ext/imgui_tab
 .PHONY: all gui run-selftest engine-test alpaca-test clean
 all: $(BUILD)/selftest $(BUILD)/engine_test
 
-$(BUILD)/selftest: $(BUILD)/selftest.o $(BUILD)/kdb_client.o $(CORE)
+$(BUILD)/selftest: $(BUILD)/selftest.o $(CORE)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 $(BUILD)/engine_test: $(BUILD)/engine_test.o $(ENGINE) $(CORE)

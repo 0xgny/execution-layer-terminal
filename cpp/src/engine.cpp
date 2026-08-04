@@ -7,14 +7,11 @@
 
 namespace el {
 
-TradingEngine::TradingEngine(std::string host, int port, int tp_port,
-                             std::vector<std::string> initial_symbols,
+TradingEngine::TradingEngine(int feed_port, std::vector<std::string> initial_symbols,
                              double initial_capital, RiskLimits limits)
-    : host_(std::move(host)),
-      port_(port),
-      tp_port_(tp_port),
-      symbols_(std::move(initial_symbols)),
+    : symbols_(std::move(initial_symbols)),
       initial_capital_(initial_capital),
+      feed_(store_, feed_port),
       risk_(limits),
       oms_(risk_, matcher_, pf_) {
     if (!symbols_.empty()) focus_ = symbols_.front();
@@ -32,6 +29,7 @@ void TradingEngine::start() {
 void TradingEngine::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
+    feed_.stop();
     stocks_.stop();
 }
 
@@ -51,10 +49,13 @@ void TradingEngine::log(const std::string& s) {
 }
 
 void TradingEngine::run() {
+    using clock = std::chrono::steady_clock;
+    constexpr auto kHistoryEvery = std::chrono::milliseconds(450);
+    constexpr auto kCatalogEvery = std::chrono::seconds(2);
+
     pf_.fund(initial_capital_);
-    if (!kdb_.connect(host_, port_)) log("connect failed: " + kdb_.last_error());
-    else log("connected to RDB " + host_ + ":" + std::to_string(port_));
-    ctrl_.connect(host_, tp_port_);  // control plane (tickerplant)
+    if (!feed_.start()) log("feed socket failed: " + feed_.last_error());
+    else log("listening for feedhandler on 127.0.0.1:" + std::to_string(feed_.port()));
 
     while (running_) {
         // 1. drain commands
@@ -67,37 +68,32 @@ void TradingEngine::run() {
             for (const Command& c : pending) process(c);
         }
 
-        // 2. reconnect if needed
-        if (!kdb_.connected() && kdb_.connect(host_, port_)) log("reconnected to RDB");
-        if (!ctrl_.connected()) ctrl_.connect(host_, tp_port_);
-
-        // 3. poll live quotes (crypto over KDB+, stocks from StockFeed's cache --
-        //    the latter is a cheap mutex copy; the HTTP calls happen on StockFeed's
-        //    own thread so they never stall this loop or the crypto polling above).
-        if (kdb_.connected()) {
-            auto qs = kdb_.snapshot(symbols_);
-            for (auto& q : qs) quotes_[q.symbol] = q;
-        }
+        // 2. read live quotes. Both sources are local, thread-safe caches kept
+        //    current by their own threads (FeedServer for crypto, StockFeed for
+        //    stocks), so this is two mutexed map copies -- no I/O on this thread.
+        for (auto& q : store_.snapshot(symbols_)) quotes_[q.symbol] = q;
         for (auto& [sym, q] : stocks_.snapshot()) quotes_[sym] = q;
 
-        // 4. periodic: price history for the focused symbol (~2x/s) and the
-        //    product catalog (~every 2s). Cheaper than doing them every cycle.
-        if (!focus_.empty() && (cycle_ % 15 == 0)) {
-            if (is_stock(focus_)) price_hist_ = stocks_.history(focus_);
-            else if (kdb_.connected()) price_hist_ = kdb_.history(focus_, 300);
+        // 3. periodic: price history for the focused symbol, and the product
+        //    catalog. Cheaper than doing them every cycle.
+        const auto now = clock::now();
+        if (!focus_.empty() && now >= next_history_) {
+            price_hist_ = is_stock(focus_) ? stocks_.history(focus_)
+                                           : store_.history(focus_, 300);
+            next_history_ = now + kHistoryEvery;
         }
         for (const auto& e : stocks_.errors()) log(e);
-        if (ctrl_.connected() && (cycle_ % 66 == 0 || products_.empty())) {
-            products_ = ctrl_.products();
+        if (now >= next_catalog_ || products_.empty()) {
+            products_ = store_.products();
             // Auto-populate the watch list from whatever the feed is streaming.
-            for (const auto& s : ctrl_.universe())
+            for (const auto& s : store_.universe())
                 if (std::find(symbols_.begin(), symbols_.end(), s) == symbols_.end())
                     symbols_.push_back(s);
             if (focus_.empty() && !symbols_.empty()) focus_ = symbols_.front();
+            next_catalog_ = now + kCatalogEvery;
         }
 
         publish();
-        ++cycle_;
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
 }
@@ -115,7 +111,7 @@ void TradingEngine::process(const Command& c) {
             }
         } else if (std::find(symbols_.begin(), symbols_.end(), c.symbol) == symbols_.end()) {
             symbols_.push_back(c.symbol);
-            ctrl_.add_symbol(c.symbol);  // ask the feed to start streaming it
+            store_.add_symbol(c.symbol);  // ask the feed to start streaming it
             focus_ = c.symbol;           // focus the chart on the new ticker
             price_hist_.clear();
             log("watching " + c.symbol);
@@ -171,7 +167,7 @@ void TradingEngine::publish() {
     for (const auto& [s, q] : quotes_) marks[s] = q.mid();
 
     EngineView v;
-    v.connected = kdb_.connected();
+    v.connected = store_.connected();
     v.risk_killed = risk_.killed();
     v.status = v.connected ? "LIVE" : "DISCONNECTED";
     v.initial_capital = pf_.initial_capital();

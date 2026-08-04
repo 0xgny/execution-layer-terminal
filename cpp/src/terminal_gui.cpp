@@ -123,9 +123,7 @@ void money_text(const char* label, double v, ImVec4 col) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const std::string host = argc > 1 ? argv[1] : "127.0.0.1";
-    const int port = argc > 2 ? std::atoi(argv[2]) : 5011;       // RDB
-    const int tp_port = argc > 3 ? std::atoi(argv[3]) : 5010;    // tickerplant
+    const int feed_port = argc > 1 ? std::atoi(argv[1]) : 5020;  // feedhandler socket
 
     if (!glfwInit()) { std::fprintf(stderr, "glfwInit failed\n"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -180,7 +178,7 @@ int main(int argc, char** argv) {
                 lim.max_order_qty = 100.0;
                 lim.max_position_qty = 1e6;
                 lim.max_order_notional = capital_input;  // no single order beyond funded capital
-                engine = new TradingEngine(host, port, tp_port, {"BTC-USD", "ETH-USD"}, capital_input, lim);
+                engine = new TradingEngine(feed_port, {"BTC-USD", "ETH-USD"}, capital_input, lim);
                 engine->start();
                 started = true;
             }
@@ -247,7 +245,7 @@ int main(int argc, char** argv) {
                 ticket_qty = (float)std::abs(net_qty);
             };
 
-            // --- Market Watch (tabbed: Crypto is live via Coinbase/KDB+, Stocks
+            // --- Market Watch (tabbed: Crypto is live via Coinbase, Stocks
             //     is Alpaca/IEX real-time -- two very differently-sourced feeds,
             //     kept visually separate rather than mixed into one table) -------
             ImGui::Begin("Market Watch");

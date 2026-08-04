@@ -15,3 +15,5 @@ cpp/third_party/implot/
 cpp/third_party/json/
 designReview*
 simplificationPlan*
+# ImGui layout written next to wherever the terminal is launched from
+/imgui.ini

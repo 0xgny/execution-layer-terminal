@@ -101,7 +101,6 @@ std::optional<Quote> AlpacaClient::latest_quote(const std::string& symbol) {
         out.bsize = q.value("bs", 0.0);
         out.asize = q.value("as", 0.0);
         out.ts_ns = now_ns();  // receipt time; exact exchange ts not needed for display
-        out.asset_class = AssetClass::Stock;
         return out;
     } catch (const std::exception& e) {
         err_ = std::string("alpaca parse error: ") + e.what();
