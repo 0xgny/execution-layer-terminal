@@ -7,7 +7,11 @@ logs/*.log
 hdb/
 # C++ build artifacts
 cpp/build/
+# macOS packaging output (.app + .dmg), regenerate with scripts/make_dmg.sh
+dist/
 # Vendored GUI libs (fetch via cpp/README setup step)
 cpp/third_party/imgui/
 cpp/third_party/implot/
 cpp/third_party/json/
+designReview*
+simplificationPlan*
