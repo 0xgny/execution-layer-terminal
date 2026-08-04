@@ -1,11 +1,10 @@
 # Execution Layer
 
 A real-time paper-trading terminal spanning two asset classes. Crypto streams
-live from Coinbase into a KDB+ tick store; stocks come from Alpaca's free
-market-data API (real IEX-venue real-time quotes + historical daily bars). A
-C++ "Bloomberg-style" terminal reads both over IPC/REST to let you trade a
-simulated account with real-time PnL, live price and PnL charts, and an order
-blotter.
+live from Coinbase; stocks come from Alpaca's free market-data API (real
+IEX-venue real-time quotes + historical daily bars). A C++ "Bloomberg-style"
+terminal consumes both to let you trade a simulated account with real-time PnL,
+live price and PnL charts, and an order blotter.
 
 It fuses two earlier projects:
 
@@ -23,26 +22,35 @@ Everything is paper trading. No real orders are ever routed.
          |                                            |
          v                                            v
   Feedhandler (Python)                          AlpacaClient (libcurl)
-         |                                            |
-         v                                            v
-  Tickerplant  tp.q  :5010               StockFeed (own background thread,
+         |  NDJSON batches over                       |
+         |  127.0.0.1:5020                            v
+         |                               StockFeed (own background thread,
          |                               polls + caches, rate-limit aware)
          v                                            |
-  Real-time DB  rdb.q  :5011                          |
-         |  (q IPC over a plain socket)                |
-         v                                            v
-                    C++ terminal
-    KdbClient + StockFeed  ->  TradingEngine (background thread)  ->  ImGui/ImPlot GUI
-                                OMS + risk gate + paper matching + portfolio/PnL
+  ============================ C++ terminal ==========================
+    FeedServer -> MarketStore  +  StockFeed
+                       |                              |
+                       v                              v
+              TradingEngine (background thread)  ->  ImGui/ImPlot GUI
+              OMS + risk gate + paper matching + portfolio/PnL
 ```
 
-The KDB+ tickerplant/RDB is the shared low-latency backbone for crypto. Python
-does ingestion; C++ does execution and the UI; both speak to KDB+ over IPC.
-Stocks are a second, independent source: the C++ terminal talks to Alpaca
-directly over HTTPS (no Python/KDB+ involved), on its own thread so a slow HTTP
-round-trip never stalls crypto polling or the GUI. Swapping either data source
-is isolated to one class (`BaseFeedHandler` subclass for crypto venues,
-`AlpacaClient`/`StockFeed` for stocks).
+Everything the terminal needs lives inside the terminal. `MarketStore` is an
+in-process last-value cache plus a bounded per-symbol price history; the Python
+feedhandler publishes batched ticks into it over a localhost socket. Python does
+ingestion, C++ does storage, execution, and the UI.
+
+Stocks are a second, independent source: the terminal talks to Alpaca directly
+over HTTPS on its own thread, so a slow HTTP round-trip never stalls the crypto
+path or the GUI. Swapping either data source is isolated to one class
+(`BaseFeedHandler` subclass for crypto venues, `AlpacaClient`/`StockFeed` for
+stocks).
+
+> Earlier versions routed crypto through a KDB+ tickerplant + RDB pair. That was
+> removed: the app's entire use of it was a per-symbol last-value lookup and the
+> last 300 trade prices of one symbol, which is a hash map and a ring buffer. See
+> `designReview.md` for the measurements and `simplificationPlan.md` for the
+> migration.
 
 For the system design -- component map, data flow, the q IPC protocol, the
 threading model, and what is built vs. planned -- see `architecture.md`.
@@ -52,8 +60,7 @@ threading model, and what is built vs. planned -- see `architecture.md`.
 ## Prerequisites
 
 - macOS (Apple Silicon supported) or Linux
-- KDB+ / q with a license (the free `kc.lic` community license is fine) -- crypto only
-- Python 3.11 (PyKX does not yet support 3.14 cleanly - see Gotchas) -- crypto only
+- Python 3.11+ -- crypto only
 - A C++20 compiler (Apple clang works)
 - For the GUI: GLFW, plus the vendored Dear ImGui, ImPlot, and nlohmann/json (fetched below)
 - libcurl (ships with macOS/most Linux distros) -- for the stock feed
@@ -64,7 +71,8 @@ threading model, and what is built vs. planned -- see `architecture.md`.
 
 ## How to run
 
-The system runs as two processes: the data stack (one command) and the terminal.
+The system runs as two processes: the feedhandler and the terminal. They can be
+started in either order.
 
 ### 1. One-time setup
 
@@ -72,7 +80,7 @@ The system runs as two processes: the data stack (one command) and the terminal.
 cd execution-layer
 
 # Python environment for the feedhandler
-python3.11 -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
 pip install -r feedhandler/requirements.txt
 
@@ -85,33 +93,30 @@ mkdir -p json && curl -fsSL -o json/json.hpp \
   https://github.com/nlohmann/json/releases/latest/download/json.hpp
 cd ../..
 
-# Tell q where its home + license live (adjust to your install)
-export QHOME="$HOME/.kx/q"
-export QLIC="$HOME/.kx"
-
 # Optional: enables the Stocks tab (Alpaca free market-data plan). Without
 # these the terminal runs crypto-only, same as before.
 export ALPACA_API_KEY_ID="..."
 export ALPACA_API_SECRET_KEY="..."
 ```
 
-### 2. Start the data stack (terminal 1)
+### 2. Start the feed (terminal 1)
 
 ```bash
 cd execution-layer
-export QHOME="$HOME/.kx/q" QLIC="$HOME/.kx"
 scripts/run_stack.sh coinbase
 ```
 
-This launches the tickerplant, the RDB, and the Coinbase feedhandler. With no
-symbol argument it boots the top-crypto universe (~95 live USD products), so the
-terminal is populated out of the box. To stream a specific set instead:
+With no symbol argument this boots the top-crypto universe (~95 live USD
+products), so the terminal is populated out of the box. To stream a specific set
+instead:
 
 ```bash
 scripts/run_stack.sh coinbase BTC-USD,ETH-USD
 ```
 
-Wait until you see `[coinbase] connected + subscribed to N products`.
+Wait until you see `[coinbase] connected + subscribed to N products`. Until you
+click START DESK in the terminal there is nothing listening, so the feedhandler
+will report that it's dropping ticks and retrying -- that's expected.
 
 ### 3. Build and run the terminal (terminal 2)
 
@@ -121,8 +126,7 @@ make gui
 ./build/terminal
 ```
 
-The terminal is a plain socket client and does NOT need QHOME/QLIC. Optional
-arguments: `./build/terminal <rdb-host> <rdb-port>` (default `127.0.0.1 5011`).
+Optional argument: `./build/terminal <feed-port>` (default `5020`).
 
 ### 4. Trade
 
@@ -140,19 +144,20 @@ arguments: `./build/terminal <rdb-host> <rdb-port>` (default `127.0.0.1 5011`).
    entry/exit/realized PnL. Click any Current position to jump to the Order
    Ticket pre-filled at its exact size, to top up or exit precisely.
 
-To stop: Ctrl-C in terminal 1 (it tears down the q processes).
+To stop: Ctrl-C in terminal 1, then close the terminal window.
 
 ---
 
 ## Running without a GUI / display
 
-The trading logic can be exercised headlessly against the live RDB:
-
 ```bash
 cd execution-layer/cpp
-make run-selftest    # single-threaded: fund, buy live, watch PnL, flatten
-make engine-test     # exercises the threaded engine + command/view handoff
+make run-selftest    # offline, no network: asserts the OMS/risk/PnL pipeline
+make engine-test     # threaded engine + command/view handoff, needs a feedhandler
 ```
+
+`selftest` is self-contained and exits non-zero on failure. `engine-test` wants a
+feedhandler running alongside it (`scripts/run_stack.sh mock` is enough).
 
 ---
 
@@ -160,27 +165,26 @@ make engine-test     # exercises the threaded engine + command/view handoff
 
 ```
 execution-layer/
-  kdb/                     KDB+ tick infrastructure (q)
-    schema.q               trade / quote table definitions (the shared contract)
-    tp.q                   tickerplant: pub/sub router + control plane (:5010)
-    rdb.q                  real-time DB: tick store + last-value caches (:5011)
   feedhandler/             Python market-data feedhandler
     schema.py              normalized Trade / Quote types
     base.py                buffering, flush loop, TLS, control loop (abstract)
     coinbase.py            Coinbase WebSocket + catalog + dynamic subscribe
     binance.py             Binance WebSocket implementation
     mock.py                synthetic feed (no network) for offline testing
-    publisher.py           PyKX bridge: batches -> .u.upd on the tickerplant
+    publisher.py           NDJSON batches -> the terminal's feed socket
     universe.py            default top-crypto universe subscribed at boot
     __main__.py            CLI entrypoint (--venue coinbase|binance|mock)
   cpp/                     C++ execution terminal
-    include/execution/     types, portfolio, risk, oms, matching, kdb_client,
-                            alpaca_client, stock_feed, engine
+    include/execution/     types, portfolio, risk, oms, matching, market_store,
+                            feed_server, alpaca_client, stock_feed, engine
     src/                   implementations + terminal_gui.cpp + headless tests
     Makefile               build (make gui / make all / make alpaca-test)
     README.md              terminal design + build detail
-  scripts/run_stack.sh     launch tp + rdb + feedhandler together
+  scripts/run_stack.sh     launch the feedhandler
+  scripts/make_dmg.sh      package the terminal as a macOS .app + .dmg
   architecture.md          system design, data flow, and rationale
+  designReview.md          objective review of the architecture
+  simplificationPlan.md    the KDB+ removal plan this repo followed
 ```
 
 ---
@@ -189,24 +193,26 @@ execution-layer/
 
 Tested end to end on Apple Silicon:
 
-- Coinbase live -> tickerplant -> RDB -> C++ client: real quotes for ~95 symbols.
+- Coinbase live -> feedhandler -> terminal: real quotes, 407-product catalog.
 - Buying/selling on live prices with correct cash, position, and PnL accounting;
-  self-test showed PnL tracking the market in real time, then flattening cleanly.
+  `engine-test` buys, marks the position as the market moves, then flattens.
 - Control plane: requesting a new ticker at runtime dynamically subscribes the
   feed and it starts streaming, no restart.
-- snap[] latency ~0.085 ms for 95 symbols (via the RDB last-value caches).
+- Feedhandler restart / terminal restart in either order, with automatic
+  reconnect in both directions.
+- `selftest` asserts the OMS state machine, risk gates, kill switch, and
+  round-trip PnL arithmetic offline.
 - Parsing unit tests for Binance and Coinbase wire formats.
 
 ---
 
 ## Known gotchas
 
-- Use Python 3.11, not 3.14. PyKX 4.0 on 3.14 raises numpy deallocator errors and
-  can crash if you publish from a worker thread. 3.11 is clean.
-- PyKX embedded q is not thread-safe: the feedhandler only publishes from its main
-  thread on purpose.
-- q needs QHOME and QLIC. If you see "license error: no license loaded", point
-  QLIC at the directory containing your kc.lic.
+- The feedhandler will say it's "dropping ticks" until you click START DESK --
+  the terminal only opens its feed socket once the desk is live. It reconnects
+  on its own; nothing to restart.
+- If the terminal logs `bind() failed on port 5020`, another copy is already
+  running.
 - TLS behind an intercepting proxy: if the feed gets CERTIFICATE_VERIFY_FAILED,
   the feedhandler uses certifi by default; for local debugging only you can set
   EL_INSECURE_SSL=1 (never for order routing).
@@ -216,16 +222,15 @@ Tested end to end on Apple Silicon:
 
 ## Roadmap
 
-Done: live feedhandler (Binance + Coinbase); tickerplant/RDB with caches; native
-C++ KDB+ client; threaded engine with paper OMS, risk gate, and matching; docked
-Bloomberg-style GUI with account bar, tabbed market watch (crypto + stocks),
-ticker search, order ticket, tabbed positions (current/previous), event log, and
-live price + PnL charts; runtime control plane to add any crypto ticker;
-top-crypto boot universe; stocks via Alpaca's free real-time IEX data API on a
-dedicated polling thread.
+Done: live feedhandler (Binance + Coinbase); in-process market store; threaded
+engine with paper OMS, risk gate, and matching; docked Bloomberg-style GUI with
+account bar, tabbed market watch (crypto + stocks), ticker search, order ticket,
+tabbed positions (current/previous), event log, and live price + PnL charts;
+runtime control plane to add any crypto ticker; top-crypto boot universe; stocks
+via Alpaca's free real-time IEX data API on a dedicated polling thread; macOS
+.app/.dmg packaging.
 
-Next: candlestick / OHLC charts with historical backfill; an Analysis Engine that
-publishes signals into a KDB+ `signal` table for the engine to consume; end-of-day
-persistence to an on-disk HDB; optional live order routing to an exchange testnet
-behind the risk gate.
-```
+Next: candlestick / OHLC charts with historical backfill; durable tick history
+(Parquet + DuckDB) to replace the in-memory-only store; an analysis layer
+producing signals for the engine to consume; optional live order routing to an
+exchange testnet behind the risk gate.

@@ -1,9 +1,7 @@
 """BaseFeedHandler: shared machinery for every exchange feed.
 
 Responsibilities that live here (so subclasses don't repeat them):
-  * buffering trades/quotes and flushing them to the tickerplant on a timer
-  * running the flush in a thread executor so the blocking PyKX IPC call never
-    stalls the asyncio event loop that reads the socket
+  * buffering trades/quotes and flushing them to the terminal on a timer
   * lifecycle / graceful shutdown
 
 A concrete subclass only implements :meth:`_run`, whose job is to read from its
@@ -19,7 +17,7 @@ import asyncio
 import time
 
 from .config import Config
-from .publisher import TickerplantPublisher
+from .publisher import FeedPublisher
 from .schema import Quote, Trade
 
 
@@ -27,7 +25,7 @@ class BaseFeedHandler(abc.ABC):
     #: short venue tag written into every tick's ``exch`` column
     exchange_name: str = "base"
 
-    def __init__(self, config: Config, publisher: TickerplantPublisher) -> None:
+    def __init__(self, config: Config, publisher: FeedPublisher) -> None:
         self.config = config
         self.publisher = publisher
         self._trades: list[Trade] = []
@@ -91,10 +89,10 @@ class BaseFeedHandler(abc.ABC):
     async def _flush_loop(self) -> None:
         while self._running:
             await asyncio.sleep(self.config.flush_interval_s)
-            # Flush on THIS (event-loop / main) thread. PyKX's embedded q is not
-            # thread-safe, so we must never publish from a worker thread. Sends
-            # are fire-and-forget (wait=False in the publisher), so the blocking
-            # time here is just serialize-and-write -- negligible at these rates.
+            # Flush on THIS (event-loop / main) thread. Publishing is a
+            # json.dumps and a socket write to localhost, so the blocking time
+            # here is negligible at these rates and an executor hop would cost
+            # more than it saves.
             self._flush()
 
     async def _stats_loop(self) -> None:

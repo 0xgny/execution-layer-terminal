@@ -1,7 +1,7 @@
 """Execution Layer feedhandler package.
 
 Normalizes exchange market-data streams into a single (trade, quote) schema and
-publishes them into a KDB+ tickerplant over IPC.
+publishes them into the C++ terminal over a localhost socket.
 """
 
 from .base import BaseFeedHandler
@@ -9,7 +9,7 @@ from .binance import BinanceFeedHandler
 from .coinbase import CoinbaseFeedHandler
 from .config import Config
 from .mock import MockFeedHandler
-from .publisher import TickerplantPublisher
+from .publisher import FeedPublisher
 from .schema import Quote, Side, Trade
 
 __all__ = [
@@ -17,7 +17,7 @@ __all__ = [
     "BinanceFeedHandler",
     "CoinbaseFeedHandler",
     "MockFeedHandler",
-    "TickerplantPublisher",
+    "FeedPublisher",
     "Config",
     "Trade",
     "Quote",

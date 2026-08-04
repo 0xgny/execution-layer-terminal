@@ -1,22 +1,23 @@
 // ============================================================================
-// selftest.cpp -- Headless end-to-end check of the live trading pipeline.
+// selftest.cpp -- Offline end-to-end check of the execution pipeline.
 //
-//   KdbClient (RDB) --> live quotes --> Portfolio + OMS + PaperMatchingEngine
+//   Quote --> Portfolio + OMS + PaperMatchingEngine --> PnL
 //
-// Connects to the RDB, funds a $10k account, buys ~$3000 of BTC-USD at the live
-// price, prints real-time PnL for a few seconds as the market moves, then
-// flattens. This verifies the whole M1/M2 wiring without needing a GUI/display.
+// Funds a $10k account, buys ~$3000 of BTC-USD at a synthetic price, marks the
+// position as the market moves, then flattens and checks the realized PnL is
+// what the arithmetic says it should be.
 //
-//   ./build/selftest [host] [port]        (defaults 127.0.0.1 5011)
+// This used to connect to a live KDB+ RDB, which meant it could only run with
+// the whole stack up and never actually asserted anything. It is now
+// deterministic, needs no network, and fails loudly.
+//
+//   ./build/selftest
 // ============================================================================
+#include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <map>
 #include <string>
-#include <unistd.h>
-#include <vector>
 
-#include "execution/kdb_client.hpp"
 #include "execution/matching.hpp"
 #include "execution/oms.hpp"
 #include "execution/portfolio.hpp"
@@ -25,17 +26,37 @@
 
 using namespace el;
 
-int main(int argc, char** argv) {
-    const char* host = argc > 1 ? argv[1] : "127.0.0.1";
-    const int port = argc > 2 ? std::atoi(argv[2]) : 5011;
-    const std::vector<std::string> watch = {"BTC-USD", "ETH-USD"};
+namespace {
 
-    KdbClient kdb;
-    if (!kdb.connect(host, port)) {
-        printf("[selftest] connect failed: %s\n", kdb.last_error().c_str());
-        return 1;
-    }
-    printf("[selftest] connected to RDB %s:%d\n", host, port);
+int failures = 0;
+
+void check(bool cond, const std::string& what) {
+    std::printf("  [%s] %s\n", cond ? " ok " : "FAIL", what.c_str());
+    if (!cond) ++failures;
+}
+
+void check_near(double got, double want, double tol, const std::string& what) {
+    const bool ok = std::fabs(got - want) <= tol;
+    std::printf("  [%s] %s (got %.6f, want %.6f)\n", ok ? " ok " : "FAIL",
+                what.c_str(), got, want);
+    if (!ok) ++failures;
+}
+
+Quote quote_at(const std::string& sym, double bid, double ask) {
+    Quote q;
+    q.symbol = sym;
+    q.bid = bid;
+    q.ask = ask;
+    q.bsize = 10.0;
+    q.asize = 10.0;
+    q.ts_ns = 1;
+    return q;
+}
+
+}  // namespace
+
+int main() {
+    std::printf("[selftest] offline execution pipeline\n");
 
     Portfolio pf;
     pf.fund(10'000.0);
@@ -47,48 +68,48 @@ int main(int argc, char** argv) {
     PaperMatchingEngine matcher;
     OrderManager oms(risk, matcher, pf);
 
-    printf("[selftest] funded $%.2f; buying ~$3000 of BTC-USD live, then flattening.\n",
-           pf.initial_capital());
+    // --- buy ~$3000 at an ask of 60,000 -------------------------------------
+    const Quote entry = quote_at("BTC-USD", 59'990.0, 60'000.0);
+    const double qty = 3000.0 / entry.ask;  // 0.05 BTC
 
-    MarkMap marks;
-    std::map<std::string, Quote> q;
-    bool bought = false;
+    auto buy = oms.submit(
+        Signal{"BTC-USD", Side::Buy, qty, OrderType::Market, 0.0, "selftest", 0}, entry);
+    check(buy.has_value(), "buy accepted");
+    check(oms.orders().at(*buy).status == OrderStatus::Filled, "buy filled");
+    check_near(pf.net_qty("BTC-USD"), qty, 1e-12, "position is 0.05 BTC");
+    check_near(pf.cash(), 10'000.0 - 3000.0, 1e-9, "cash reduced by notional");
 
-    for (int i = 0; i < 16; ++i) {
-        auto qs = kdb.snapshot(watch);
-        if (qs.empty()) {
-            printf("  (no data: %s)\n", kdb.last_error().c_str());
-            usleep(500'000);
-            continue;
-        }
-        for (auto& x : qs) { q[x.symbol] = x; marks[x.symbol] = x.mid(); }
+    // --- market moves up 10%: unrealized should be +$300 --------------------
+    MarkMap marks{{"BTC-USD", 66'000.0}};
+    check_near(pf.unrealized(marks), qty * (66'000.0 - 60'000.0), 1e-9, "unrealized +$300");
+    check_near(pf.total_pnl(marks), 300.0, 1e-9, "total PnL +$300");
 
-        if (i == 2 && q.count("BTC-USD")) {
-            const double ask = q["BTC-USD"].ask;
-            const double qty = 3000.0 / ask;
-            Signal s{"BTC-USD", Side::Buy, qty, OrderType::Market, 0.0, "selftest", 0};
-            if (auto id = oms.submit(s, q["BTC-USD"])) {
-                const Order& o = oms.orders().at(*id);
-                printf("  >>> BUY %.6f BTC @ %.2f -> %s", qty, ask, to_string(o.status));
-                if (o.status == OrderStatus::Rejected) printf(" (%s)", o.reject_reason.c_str());
-                printf("\n");
-                bought = (o.status == OrderStatus::Filled);
-            }
-        }
-        if (i == 12 && bought) {
-            if (auto id = oms.flatten("BTC-USD", q["BTC-USD"])) {
-                const Order& o = oms.orders().at(*id);
-                printf("  <<< FLATTEN BTC-USD -> %s @ %.2f\n", to_string(o.status), o.avg_fill_price);
-            }
-        }
+    // --- flatten into a bid of 66,000 ---------------------------------------
+    const Quote exit = quote_at("BTC-USD", 66'000.0, 66'010.0);
+    auto flat = oms.flatten("BTC-USD", exit);
+    check(flat.has_value(), "flatten accepted");
+    check_near(pf.net_qty("BTC-USD"), 0.0, 1e-12, "position closed");
+    check_near(pf.realized(), 300.0, 1e-9, "realized +$300");
+    check_near(pf.cash(), 10'300.0, 1e-9, "cash back to 10,300");
+    check(pf.closed_positions().size() == 1, "one round trip recorded");
 
-        const double mid = marks.count("BTC-USD") ? marks["BTC-USD"] : 0.0;
-        printf("  t=%2d  BTC mid=%.2f  pos=%.6f  cash=%.2f  equity=%.2f  PnL=%+.2f\n",
-               i, mid, pf.net_qty("BTC-USD"), pf.cash(), pf.equity(marks), pf.total_pnl(marks));
-        usleep(600'000);
-    }
+    // --- gates --------------------------------------------------------------
+    auto too_big = oms.submit(
+        Signal{"BTC-USD", Side::Buy, 2.0, OrderType::Market, 0.0, "selftest", 0}, entry);
+    check(too_big && oms.orders().at(*too_big).status == OrderStatus::Rejected,
+          "order above max_order_qty rejected");
 
-    printf("[selftest] done. realized=%.2f  final equity=%.2f  total PnL=%+.2f\n",
-           pf.realized(), pf.equity(marks), pf.total_pnl(marks));
-    return 0;
+    auto no_shorting = oms.submit(
+        Signal{"BTC-USD", Side::Sell, 0.5, OrderType::Market, 0.0, "selftest", 0}, entry);
+    check(no_shorting && oms.orders().at(*no_shorting).status == OrderStatus::Rejected,
+          "sell with no position rejected");
+
+    risk.kill("selftest");
+    auto after_kill = oms.submit(
+        Signal{"BTC-USD", Side::Buy, 0.01, OrderType::Market, 0.0, "selftest", 0}, entry);
+    check(after_kill && oms.orders().at(*after_kill).status == OrderStatus::Rejected,
+          "kill switch denies subsequent orders");
+
+    std::printf("[selftest] %s\n", failures == 0 ? "PASS" : "FAIL");
+    return failures == 0 ? 0 : 1;
 }

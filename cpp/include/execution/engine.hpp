@@ -2,18 +2,20 @@
 // engine.hpp -- TradingEngine: the threaded core behind the terminal.
 //
 // Threading model (the fast/clean part):
-//   * ONE background thread owns all mutable trading state (KdbClient, Portfolio,
-//     OMS, quote cache) and does all KDB+ IPC. KDB+/PyKX client state is not
-//     thread-safe, so it lives on exactly one thread.
+//   * ONE background thread owns all mutable trading state (Portfolio, OMS,
+//     quote cache) and drives the whole desk.
 //   * The GUI thread never touches that state directly. It POSTs Commands
 //     (buy/sell/flatten/...) into a queue and reads an immutable EngineView
 //     snapshot that the engine republishes each cycle. Two small mutexes guard
-//     the command queue and the published view; the render loop never blocks on
-//     IPC.
+//     the command queue and the published view; the render loop never blocks.
+//   * Market data arrives on two other threads -- FeedServer (crypto) and
+//     StockFeed (Alpaca) -- each writing into its own thread-safe cache that
+//     the engine reads. No network I/O happens on the engine thread at all.
 // ============================================================================
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -21,7 +23,8 @@
 #include <thread>
 #include <vector>
 
-#include "execution/kdb_client.hpp"
+#include "execution/feed_server.hpp"
+#include "execution/market_store.hpp"
 #include "execution/matching.hpp"
 #include "execution/oms.hpp"
 #include "execution/portfolio.hpp"
@@ -80,10 +83,8 @@ struct Command {
 
 class TradingEngine {
 public:
-    // `port` is the RDB (quotes/history); `tp_port` is the tickerplant (control
-    // plane: add-symbol + product catalog).
-    TradingEngine(std::string host, int port, int tp_port,
-                  std::vector<std::string> initial_symbols,
+    // `feed_port` is the localhost port the Python feedhandler publishes into.
+    TradingEngine(int feed_port, std::vector<std::string> initial_symbols,
                   double initial_capital, RiskLimits limits);
     ~TradingEngine();
 
@@ -100,15 +101,12 @@ private:
     void publish();
     bool is_stock(const std::string& symbol) const;
 
-    std::string host_;
-    int port_;
-    int tp_port_;
     std::vector<std::string> symbols_;  // engine-thread owned
     double initial_capital_;
 
-    KdbClient kdb_;    // RDB connection: quotes + history (crypto)
-    KdbClient ctrl_;   // tickerplant connection: control plane + catalog (crypto)
-    StockFeed stocks_; // Alpaca poller, own thread (stocks)
+    MarketStore store_;  // crypto quotes/history/catalog (declare before feed_)
+    FeedServer feed_;    // accepts the Python feedhandler, own thread
+    StockFeed stocks_;   // Alpaca poller, own thread (stocks)
     Portfolio pf_;
     RiskManager risk_;
     PaperMatchingEngine matcher_;
@@ -120,7 +118,12 @@ private:
     std::vector<std::string> products_;      // cached catalog
     std::vector<double> price_hist_;         // last-trade prices for focus_
     std::deque<double> pnl_hist_, eq_hist_;  // account time series (ring)
-    int cycle_ = 0;
+
+    // Named refresh deadlines. Previously `cycle_ % 15` / `% 66`, which encoded
+    // these intervals as counts of the loop sleep -- change the sleep and both
+    // silently meant something else.
+    std::chrono::steady_clock::time_point next_history_{};
+    std::chrono::steady_clock::time_point next_catalog_{};
 
     std::thread thread_;
     std::atomic<bool> running_{false};

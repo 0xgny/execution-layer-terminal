@@ -4,7 +4,8 @@ Usage:
     python -m feedhandler --venue binance --symbols BTCUSDT,ETHUSDT
     python -m feedhandler --venue mock          # no network required
 
-Run the tickerplant (kdb/tp.q) and RDB (kdb/rdb.q) first; see the project README.
+Publishes into the C++ terminal over a localhost socket. The terminal can be
+started before or after this process; see the project README.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from .binance import BinanceFeedHandler
 from .coinbase import CoinbaseFeedHandler
 from .config import Config
 from .mock import MockFeedHandler
-from .publisher import TickerplantPublisher
+from .publisher import FeedPublisher
 
 _VENUES: dict[str, type[BaseFeedHandler]] = {
     "binance": BinanceFeedHandler,
@@ -31,8 +32,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--venue", choices=sorted(_VENUES), default="binance",
                    help="exchange to stream from (default: binance)")
     p.add_argument("--symbols", help="comma-separated tickers, overrides EL_SYMBOLS")
-    p.add_argument("--tp-host", help="tickerplant host, overrides EL_TP_HOST")
-    p.add_argument("--tp-port", type=int, help="tickerplant port, overrides EL_TP_PORT")
+    p.add_argument("--feed-host", help="terminal host, overrides EL_FEED_HOST")
+    p.add_argument("--feed-port", type=int, help="terminal port, overrides EL_FEED_PORT")
     return p.parse_args()
 
 
@@ -45,15 +46,15 @@ def main() -> None:
         # Boot the Coinbase feed on the full top-crypto universe by default.
         from .universe import TOP_CRYPTO
         config.symbols = list(TOP_CRYPTO)
-    if args.tp_host:
-        config.tp_host = args.tp_host
-    if args.tp_port:
-        config.tp_port = args.tp_port
+    if args.feed_host:
+        config.feed_host = args.feed_host
+    if args.feed_port:
+        config.feed_port = args.feed_port
 
     print(f"[main] venue={args.venue} symbols={config.symbols} "
-          f"tp={config.tp_host}:{config.tp_port}")
+          f"terminal={config.feed_host}:{config.feed_port}")
 
-    publisher = TickerplantPublisher(config.tp_host, config.tp_port)
+    publisher = FeedPublisher(config.feed_host, config.feed_port)
     handler = _VENUES[args.venue](config, publisher)
 
     try:

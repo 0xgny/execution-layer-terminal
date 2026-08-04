@@ -22,9 +22,9 @@ def _env_list(name: str, default: list[str]) -> list[str]:
 
 @dataclass(slots=True)
 class Config:
-    # --- Tickerplant IPC target -------------------------------------------
-    tp_host: str = os.environ.get("EL_TP_HOST", "localhost")
-    tp_port: int = int(os.environ.get("EL_TP_PORT", "5010"))
+    # --- Terminal feed socket ---------------------------------------------
+    feed_host: str = os.environ.get("EL_FEED_HOST", "127.0.0.1")
+    feed_port: int = int(os.environ.get("EL_FEED_PORT", "5020"))
 
     # --- What to stream ----------------------------------------------------
     # Symbols are exchange-native tickers (Binance uses e.g. BTCUSDT).
@@ -33,8 +33,9 @@ class Config:
     )
 
     # --- Batching / flush behaviour ---------------------------------------
-    # We buffer ticks and flush them to the tickerplant on a timer to amortize
-    # IPC overhead, mirroring the "N ticks per publish" pattern of a real feed.
+    # We buffer ticks and flush them to the terminal on a timer to amortize
+    # per-message overhead, mirroring the "N ticks per publish" pattern of a
+    # real feed.
     flush_interval_s: float = float(os.environ.get("EL_FLUSH_INTERVAL", "0.25"))
     max_buffer: int = int(os.environ.get("EL_MAX_BUFFER", "1000"))
 

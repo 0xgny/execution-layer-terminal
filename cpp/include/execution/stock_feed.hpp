@@ -3,7 +3,7 @@
 //
 // HTTP round-trips (tens to hundreds of ms) are too slow to run on
 // TradingEngine's 30ms loop without stalling crypto polling too. StockFeed
-// owns its own thread, exactly like TradingEngine owns KdbClient, and
+// owns its own thread, exactly like TradingEngine owns FeedServer, and
 // publishes a small thread-safe cache that the engine reads each cycle with a
 // cheap mutex copy -- no I/O on the engine thread for stocks.
 //

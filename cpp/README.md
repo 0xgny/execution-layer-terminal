@@ -1,7 +1,7 @@
 # Execution Layer -- C++ terminal
 
 The execution half of the platform: a paper-trading terminal that trades on live
-Coinbase market data flowing through KDB+, plus stocks via Alpaca's free
+live Coinbase market data, plus stocks via Alpaca's free
 market-data API. It turns user actions into orders, gates them through risk
 controls, fills them on a paper matching engine, and shows real-time PnL --
 rendered as a Bloomberg-terminal-style docked GUI (Dear ImGui + ImPlot). Paper
@@ -9,15 +9,17 @@ only; no real orders are routed to either venue.
 
 ## How data reaches C++
 
-**Crypto.** The terminal is a native KDB+ client. Rather than depend on KX's
-prebuilt `c.o` (not published for arm64 macOS) or embed the whole `libq`
-runtime, it implements the small q IPC protocol directly over a socket
-(`kdb_client.cpp`, verified byte-for-byte against a live q). It calls the RDB's
-`snap[syms]` and `hist[]` functions and parses the results. Zero external SDK.
+**Crypto.** The terminal stores its own market data. `FeedServer` listens on
+127.0.0.1:5020, the Python feedhandler connects and writes batched ticks as
+newline-delimited JSON, and `MarketStore` keeps a per-symbol last-value cache
+plus a bounded price history. The engine reads both with a map lookup -- same
+process, no serialization, no round trip.
 
 ```
-Coinbase -> feedhandler(Py) -> tp.q -> rdb.q --(q IPC over socket)--> KdbClient -> TradingEngine -> GUI
+Coinbase -> feedhandler(Py) --(NDJSON over localhost)--> FeedServer -> MarketStore -> TradingEngine -> GUI
 ```
+
+This replaced a KDB+ tickerplant + RDB pair. See `../designReview.md` for why.
 
 **Stocks.** `AlpacaClient` (`alpaca_client.hpp`/`.cpp`) is a small libcurl-based
 REST client against Alpaca's free "Basic" market-data plan: real IEX-venue
@@ -32,17 +34,18 @@ Alpaca (IEX real-time) --(HTTPS)--> AlpacaClient --(own thread)--> StockFeed -> 
 
 ## Threading model
 
-- One engine thread (`TradingEngine`) owns all mutable state (`KdbClient`,
-  `Portfolio`, `OMS`, quote cache) and does all KDB+ IPC (client state is not
-  thread-safe, so it lives on exactly one thread). It polls quotes ~33x/s,
-  processes queued commands, and republishes an immutable `EngineView`.
+- One engine thread (`TradingEngine`) owns the trading state (`Portfolio`,
+  `OMS`, quote cache). It reads the market-data caches ~33x/s, processes queued
+  commands, and republishes an immutable `EngineView`. It never does I/O.
+- `FeedServer` owns a thread that accepts the feedhandler and decodes its
+  batches into `MarketStore`, which guards itself with a mutex.
 - `StockFeed` owns a second background thread purely for Alpaca HTTP calls,
   round-robining watched stock symbols so the engine only ever does a cheap
   mutex-guarded copy of its cache -- never a network call.
 - The GUI thread never touches trading state: it reads an `EngineView` snapshot
   each frame and posts `Command`s (buy/sell/flatten/add-symbol/kill). Two small
   mutexes guard the command queue and the published view; the render loop never
-  blocks on IPC.
+  blocks on anything.
 
 ## Build and run
 
@@ -90,13 +93,13 @@ scripts/run_stack.sh coinbase BTC-USD,ETH-USD
 cd cpp
 make gui                 # build the terminal (needs glfw + vendored imgui/implot/json)
 ./build/terminal         # opens the Bloomberg-style window
-# optional args:  ./build/terminal <rdb-host> <rdb-port>   (default 127.0.0.1 5011)
+# optional arg:   ./build/terminal <feed-port>   (default 5020)
 ```
 
 On launch, enter your initial capital, hit START DESK, and you get a tiled desk:
 
 - Account bar -- cash / equity / live PnL / connection status / KILL switch
-- Market Watch -- tabbed **Crypto** (live top-of-book via Coinbase/KDB+) and
+- Market Watch -- tabbed **Crypto** (live top-of-book via Coinbase) and
   **Stocks** (Alpaca/IEX real-time); click a row to chart it, or type an exact
   ticker to add one ("+ Watch" / "+ Add Stock")
 - Ticker Search -- search/browse the full Coinbase catalog (~400 USD products,
@@ -120,15 +123,15 @@ On launch, enter your initial capital, hit START DESK, and you get a tiled desk:
 ### The control plane
 
 Selecting a new ticker posts an `AddSymbol` command, the engine calls `.u.addsym`
-on the tickerplant, the Python feedhandler polls that list and sends a live
+in the store, the Python feedhandler polls for it and sends a live
 subscribe to Coinbase for the new product, its ticks flow into the RDB, and the
 terminal charts and trades it. All at runtime, no restart. The product catalog is
-fetched once by the feedhandler (Coinbase REST) and published into the tickerplant
+fetched once by the feedhandler (Coinbase REST) and published into the store
 for the terminal to browse.
 
 By default the Coinbase feed boots the top-crypto universe (~95 live USD products;
 see `feedhandler/universe.py`), so Market Watch is populated out of the box. The
-engine auto-discovers them from the tickerplant's `universe` list.
+engine auto-discovers them from the store's `universe` list.
 
 Note: the vendored ImPlot is `master`; line colors are set via
 `ImPlotSpec::LineColor` (the older `SetNextLineStyle`/`ImPlotCol_Line` are gone).
@@ -151,7 +154,8 @@ make alpaca-test      # verifies Alpaca auth + quote/bars parsing (needs env var
 | `risk.hpp` / `risk.cpp` | `RiskManager`: limits + kill switch (fail-closed) |
 | `matching.hpp` / `matching.cpp` | `PaperMatchingEngine`: fills vs top-of-book |
 | `oms.hpp` / `oms.cpp` | `OrderManager`: state machine, buying-power / no-short gates, routing |
-| `kdb_client.hpp` / `kdb_client.cpp` | pure-socket q IPC client (connect, snap, hist, catalog) |
+| `market_store.hpp` / `market_store.cpp` | in-process last-value cache + bounded price history + catalog |
+| `feed_server.hpp` / `feed_server.cpp` | localhost NDJSON socket the feedhandler publishes into |
 | `alpaca_client.hpp` / `alpaca_client.cpp` | libcurl REST client for Alpaca quotes + daily bars |
 | `stock_feed.hpp` / `stock_feed.cpp` | background poller wrapping `AlpacaClient`, own thread |
 | `engine.hpp` / `engine.cpp` | `TradingEngine`: background thread, `EngineView`, `Command`s |
@@ -160,7 +164,7 @@ make alpaca-test      # verifies Alpaca auth + quote/bars parsing (needs env var
 
 ## What is verified
 
-- `KdbClient` pulls live Coinbase quotes through KDB+ (real bid/ask/sizes).
+- `MarketStore` serves live Coinbase quotes (real bid/ask/sizes) to the engine.
 - `selftest`: funded $10k, bought $3000 of BTC live, PnL tracked the market in real
   time, flattened; cash restored, realized PnL correct.
 - `engine_test`: threaded engine buy / view / flatten works; event log correct; the
@@ -171,7 +175,7 @@ make alpaca-test      # verifies Alpaca auth + quote/bars parsing (needs env var
 
 ## Roadmap (this component)
 
-Done: native KDB+ client; threaded engine with paper OMS, risk gate, and matching;
+Done: in-process market store + feed socket; threaded engine with paper OMS, risk gate, and matching;
 docked Bloomberg-style GUI; runtime control plane to add any ticker; live price and
 PnL charts; stocks via Alpaca (real-time IEX quotes + daily bars); Current/Previous
 position history; click-a-position-to-ticket.
@@ -179,5 +183,5 @@ position history; click-a-position-to-ticket.
 Next:
 - Candlestick / OHLC charts + historical backfill (Coinbase REST candles; Alpaca
   bars are already fetched for stocks but only plotted as a close-price line today).
-- Consume the KDB+ `signal` table (signals from the Python Analysis Engine).
+- Consume signals from an analysis layer.
 - Optional live order routing to an exchange testnet, behind the risk gate.

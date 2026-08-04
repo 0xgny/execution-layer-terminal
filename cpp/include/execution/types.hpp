@@ -59,7 +59,6 @@ struct Quote {
     double bsize = 0.0;
     double asize = 0.0;
     TimestampNs ts_ns = 0;
-    AssetClass asset_class = AssetClass::Crypto;
 
     double mid() const { return 0.5 * (bid + ask); }
     double spread() const { return ask - bid; }
