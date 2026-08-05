@@ -533,7 +533,17 @@ int main(int argc, char** argv) {
 
             // --- Price Chart (focused symbol) -----------------------------------
             ImGui::Begin("Price Chart");
-            ImGui::TextColored(kAmber, "%s", v.focus.empty() ? "(select a symbol)" : v.focus.c_str());
+            if (v.focus.empty()) {
+                ImGui::TextColored(kAmber, "(select a symbol)");
+            } else {
+                ImGui::TextColored(kAmber, "%s", v.focus.c_str());
+                // Full name beside the ticker, dimmed so the symbol still reads
+                // first. Only shown here -- the Market Watch rows stay compact.
+                if (!v.focus_name.empty()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", v.focus_name.c_str());
+                }
+            }
             if (v.price_history.size() >= 2) {
                 if (ImPlot::BeginPlot("##px", ImVec2(-1, -1), ImPlotFlags_NoLegend | ImPlotFlags_NoMouseText)) {
                     // Fit X to the data, but give Y ~15% headroom top and bottom so

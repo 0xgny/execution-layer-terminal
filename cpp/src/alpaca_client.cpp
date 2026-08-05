@@ -52,13 +52,13 @@ size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
 AlpacaClient::AlpacaClient()
     : key_(getenv_or("ALPACA_API_KEY_ID")), secret_(getenv_or("ALPACA_API_SECRET_KEY")) {}
 
-bool AlpacaClient::get(const std::string& path, std::string& body) {
+bool AlpacaClient::get(const std::string& path, std::string& body, const char* host) {
     if (!configured()) { err_ = "ALPACA_API_KEY_ID/ALPACA_API_SECRET_KEY not set"; return false; }
 
     CURL* curl = curl_easy_init();
     if (!curl) { err_ = "curl_easy_init failed"; return false; }
 
-    const std::string url = "https://data.alpaca.markets" + path;
+    const std::string url = std::string(host) + path;
     struct curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, ("APCA-API-KEY-ID: " + key_).c_str());
     headers = curl_slist_append(headers, ("APCA-API-SECRET-KEY: " + secret_).c_str());
@@ -126,6 +126,16 @@ std::vector<double> AlpacaClient::daily_bars(const std::string& symbol, int n) {
         err_ = std::string("alpaca parse error: ") + e.what();
         return {};
     }
+}
+
+std::string AlpacaClient::asset_name(const std::string& symbol) {
+    std::string body;
+    if (!get("/v2/assets/" + symbol, body, kTradingHost)) return {};
+    auto j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return {};
+    auto it = j.find("name");
+    if (it == j.end() || !it->is_string()) return {};
+    return it->get<std::string>();
 }
 
 }  // namespace el

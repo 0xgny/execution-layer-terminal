@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <map>
 #include <vector>
 
 #include "execution/market_store.hpp"
@@ -178,6 +179,16 @@ void FeedServer::handle_line(const std::string& line, int client_fd) {
             if (s.is_string()) out.push_back(s.get<std::string>());
         if (m == "products") store_.set_products(std::move(out));
         else store_.set_universe(std::move(out));
+        return;
+    }
+
+    if (m == "names") {
+        const auto map = msg.find("map");
+        if (map == msg.end() || !map->is_object()) return;
+        std::map<std::string, std::string> names;
+        for (auto it = map->begin(); it != map->end(); ++it)
+            if (it.value().is_string()) names[it.key()] = it.value().get<std::string>();
+        store_.set_names(std::move(names));
         return;
     }
 

@@ -28,6 +28,17 @@ void MarketStore::set_universe(std::vector<std::string> universe) {
     universe_ = std::move(universe);
 }
 
+void MarketStore::set_names(std::map<std::string, std::string> names) {
+    std::lock_guard<std::mutex> lk(mu_);
+    names_ = std::move(names);
+}
+
+std::string MarketStore::name(const std::string& symbol) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = names_.find(symbol);
+    return it == names_.end() ? std::string{} : it->second;
+}
+
 std::vector<std::string> MarketStore::take_requested() {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<std::string> out;

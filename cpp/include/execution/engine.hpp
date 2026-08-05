@@ -67,6 +67,7 @@ struct EngineView {
     std::vector<std::string> log;       // most-recent last
     std::vector<std::string> products;  // catalog for the ticker search (crypto)
     std::string focus;                  // symbol whose chart is populated
+    std::string focus_name;             // e.g. "Bitcoin"; empty if unknown
     std::vector<double> price_history;  // last-trade prices for `focus`
     std::vector<double> pnl_history;    // account PnL over time
     std::vector<double> equity_history; // account equity over time
@@ -126,6 +127,7 @@ private:
     // silently meant something else.
     std::chrono::steady_clock::time_point next_history_{};
     std::chrono::steady_clock::time_point next_catalog_{};
+    bool universe_seen_ = false;  // keep polling fast until the watch list lands
 
     std::thread thread_;
     std::atomic<bool> running_{false};

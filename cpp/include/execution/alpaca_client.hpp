@@ -38,12 +38,23 @@ public:
     // the Price Chart already expects from MarketStore::history).
     std::vector<double> daily_bars(const std::string& symbol, int n);
 
+    // Company name for a symbol ("AAPL" -> "Apple Inc. Common Stock"), for the
+    // chart header. Empty on any failure -- purely cosmetic, never fatal.
+    // Note this lives on the *trading* host, not the market-data host.
+    std::string asset_name(const std::string& symbol);
+
     const std::string& last_error() const { return err_; }
 
 private:
-    // GET `path` on the data API host with the APCA auth headers. Returns
-    // false (and sets err_) on any transport or HTTP-status failure.
-    bool get(const std::string& path, std::string& body);
+    // GET `path` on `host` with the APCA auth headers. Returns false (and sets
+    // err_) on any transport or HTTP-status failure.
+    static constexpr const char* kDataHost = "https://data.alpaca.markets";
+    // Asset metadata lives on the trading API, not the data API. paper-api
+    // works with the free/paper keys this app expects; api.alpaca.markets
+    // returns 401 for them.
+    static constexpr const char* kTradingHost = "https://paper-api.alpaca.markets";
+
+    bool get(const std::string& path, std::string& body, const char* host = kDataHost);
 
     std::string key_;
     std::string secret_;

@@ -92,10 +92,18 @@ void TradingEngine::run() {
             next_history_ = now + kHistoryEvery;
         }
         for (const auto& e : stocks_.errors()) log(e);
-        if (now >= next_catalog_ || products_.empty()) {
+        // Poll every cycle until both the catalog and the streaming universe
+        // have landed, then settle to the slow cadence. Gating only on
+        // `products_.empty()` used to cost up to a full kCatalogEvery of dead
+        // air: products and universe arrive as two separate messages, so a poll
+        // could see the catalog, push the next deadline out 2s, and leave the
+        // watch list empty for that whole window.
+        if (now >= next_catalog_ || products_.empty() || !universe_seen_) {
             products_ = store_.products();
             // Auto-populate the watch list from whatever the feed is streaming.
-            for (const auto& s : store_.universe())
+            const auto universe = store_.universe();
+            if (!universe.empty()) universe_seen_ = true;
+            for (const auto& s : universe)
                 if (std::find(symbols_.begin(), symbols_.end(), s) == symbols_.end())
                     symbols_.push_back(s);
             if (focus_.empty() && !symbols_.empty()) focus_ = symbols_.front();
@@ -233,6 +241,11 @@ void TradingEngine::publish() {
     v.log.assign(log_.begin(), log_.end());
     v.products = products_;
     v.focus = focus_;
+    // Resolve only the focused symbol's name -- the chart is the one place it's
+    // shown, so there's no reason to ship the whole map to the GUI every frame.
+    v.focus_name = focus_.empty() ? std::string{}
+                 : is_stock(focus_) ? stocks_.name(focus_)
+                                    : store_.name(focus_);
     v.price_history = price_hist_;
     v.pnl_history.assign(pnl_hist_.begin(), pnl_hist_.end());
     v.equity_history.assign(eq_hist_.begin(), eq_hist_.end());

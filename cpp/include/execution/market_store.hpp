@@ -41,6 +41,7 @@ public:
     void on_trade(const std::string& symbol, double price);
     void set_products(std::vector<std::string> products);
     void set_universe(std::vector<std::string> universe);
+    void set_names(std::map<std::string, std::string> names);
     void set_feed_attached(bool attached) { feed_attached_ = attached; }
 
     // Drain the symbols the terminal has asked to start streaming. Draining
@@ -62,6 +63,10 @@ public:
     std::vector<std::string> products() const;
     std::vector<std::string> universe() const;
 
+    // Human-readable name for a symbol ("BTC-USD" -> "Bitcoin"). Empty if the
+    // feed hasn't published one; callers show the bare symbol in that case.
+    std::string name(const std::string& symbol) const;
+
     // Ask the feed to start streaming `symbol` (was `.u.addsym` on the tp).
     void add_symbol(const std::string& symbol);
 
@@ -72,6 +77,7 @@ private:
     std::vector<std::string> products_;
     std::vector<std::string> universe_;
     std::vector<std::string> requested_;
+    std::map<std::string, std::string> names_;
 
     // Read by the engine every cycle without taking the mutex, so it's atomic.
     std::atomic<bool> feed_attached_{false};

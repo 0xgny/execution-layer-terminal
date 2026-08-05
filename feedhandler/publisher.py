@@ -11,6 +11,7 @@ Wire format (see cpp/include/execution/feed_server.hpp for the reading half):
     {"m":"trades","rows":[[sym,price,ts_ns], ...]}
     {"m":"products","syms":[...]}
     {"m":"universe","syms":[...]}
+    {"m":"names","map":{"BTC-USD":"Bitcoin", ...}}
     {"m":"poll"}                 -> {"m":"requested","syms":[...]}
 
 Why batches of rows rather than one message per tick?
@@ -32,7 +33,13 @@ import time
 
 from .schema import Quote, Trade
 
-_RETRY_INTERVAL_S = 2.0
+# Reconnect interval. Deliberately flat and short rather than an exponential
+# backoff: the feed sits disconnected for however long it takes the user to click
+# START DESK, so any backoff has already decayed to its maximum by the exact
+# moment latency matters. A failed connect to a closed loopback port costs
+# microseconds, and connect() is only reached from the flush loop (4x/s) and the
+# control loop, so retrying every time is free.
+_RETRY_INTERVAL_S = 0.25
 
 
 class FeedPublisher:
@@ -50,6 +57,16 @@ class FeedPublisher:
         # Search is empty for the whole session.
         self._last_products: list[str] = []
         self._last_universe: list[str] = []
+        # Latest top-of-book per symbol. Coinbase sends a snapshot for every
+        # product at subscribe time and then only updates it when that product
+        # trades -- so an illiquid pair may not tick again for minutes. If the
+        # terminal attaches after that initial burst (which it always does; we
+        # start first), those snapshots are gone and the Market Watch fills in
+        # one row at a time as each product happens to trade. Caching the last
+        # quote and replaying it on connect makes the watch list populate at
+        # once. Bounded by symbol count, so a few hundred rows at most.
+        self._last_quotes: dict[str, list] = {}
+        self._last_names: dict[str, str] = {}
         self.connect()
 
     # -- connection ---------------------------------------------------------
@@ -99,11 +116,16 @@ class FeedPublisher:
             return False
 
     def _resync(self) -> None:
-        """Push cached state to a freshly attached terminal."""
+        """Push cached state to a freshly attached terminal: catalog, streaming
+        universe, and the latest known quote for every symbol."""
         if self._last_products:
             self._write({"m": "products", "syms": self._last_products})
         if self._last_universe and self._sock is not None:
             self._write({"m": "universe", "syms": self._last_universe})
+        if self._last_names and self._sock is not None:
+            self._write({"m": "names", "map": self._last_names})
+        if self._last_quotes and self._sock is not None:
+            self._write({"m": "quotes", "rows": list(self._last_quotes.values())})
 
     def _send(self, msg: dict) -> bool:
         if not self.connect():
@@ -122,11 +144,11 @@ class FeedPublisher:
     def publish_quotes(self, quotes: list[Quote]) -> None:
         if not quotes:
             return
-        self._send({
-            "m": "quotes",
-            "rows": [[q.symbol, q.bid, q.ask, q.bsize, q.asize, q.event_time_ns]
-                     for q in quotes],
-        })
+        rows = [[q.symbol, q.bid, q.ask, q.bsize, q.asize, q.event_time_ns]
+                for q in quotes]
+        for r in rows:
+            self._last_quotes[r[0]] = r   # keep the newest per symbol for resync
+        self._send({"m": "quotes", "rows": rows})
 
     # -- control plane ------------------------------------------------------
     def query_requested(self) -> list[str]:
@@ -162,6 +184,12 @@ class FeedPublisher:
         Cached, so a terminal that attaches later still gets it."""
         self._last_products = list(ids)
         self._send({"m": "products", "syms": self._last_products})
+
+    def set_names(self, names: dict[str, str]) -> None:
+        """Publish human-readable names (BTC-USD -> "Bitcoin") for the chart
+        header. Cached and resent on connect, like the rest of the catalog."""
+        self._last_names = dict(names)
+        self._send({"m": "names", "map": self._last_names})
 
     def set_universe(self, ids: list[str]) -> None:
         """Publish the set of symbols the feed is actually streaming, so the
