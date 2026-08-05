@@ -47,6 +47,12 @@ std::vector<double> StockFeed::history(const std::string& symbol) {
     return it == bars_.end() ? std::vector<double>{} : it->second;
 }
 
+std::string StockFeed::name(const std::string& symbol) {
+    std::lock_guard<std::mutex> lk(data_mu_);
+    auto it = names_.find(symbol);
+    return it == names_.end() ? std::string{} : it->second;
+}
+
 std::vector<std::string> StockFeed::errors() {
     std::lock_guard<std::mutex> lk(err_mu_);
     std::vector<std::string> out(errors_.begin(), errors_.end());
@@ -81,6 +87,19 @@ void StockFeed::run() {
                 auto bit = last_bars_fetch_.find(sym);
                 need_bars = (bit == last_bars_fetch_.end()) ||
                             (t - bit->second) > (TimestampNs)kBarsRefreshSecs * 1'000'000'000LL;
+            }
+
+            // Name is immutable, so fetch it once per symbol. Cheap: one extra
+            // request the first time a stock is watched, never again.
+            bool need_name;
+            {
+                std::lock_guard<std::mutex> lk(data_mu_);
+                need_name = names_.find(sym) == names_.end();
+            }
+            if (need_name) {
+                std::string nm = client_.asset_name(sym);
+                std::lock_guard<std::mutex> lk(data_mu_);
+                names_[sym] = nm;  // cache even an empty result; don't retry forever
             }
 
             if (need_quote) {

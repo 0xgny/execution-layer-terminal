@@ -41,6 +41,7 @@ from .schema import Quote, Side, Trade
 
 _WS_URL = "wss://ws-feed.exchange.coinbase.com"
 _PRODUCTS_URL = "https://api.exchange.coinbase.com/products"
+_CURRENCIES_URL = "https://api.exchange.coinbase.com/currencies"
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -111,27 +112,47 @@ class CoinbaseFeedHandler(BaseFeedHandler):
 
     async def _publish_catalog(self, ssl_ctx) -> None:
         """Fetch the list of tradable USD/USDC products and publish it so the
-        terminal can offer a searchable ticker list."""
+        terminal can offer a searchable ticker list. Also publishes display
+        names (BTC-USD -> "Bitcoin") for the chart header."""
         import asyncio as _asyncio
         import urllib.request
 
-        def fetch() -> list[str]:
-            req = urllib.request.Request(_PRODUCTS_URL, headers={"User-Agent": "execution-layer"})
+        def get_json(url):
+            req = urllib.request.Request(url, headers={"User-Agent": "execution-layer"})
             with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as r:
-                data = json.loads(r.read().decode())
-            return sorted(
-                p["id"] for p in data
+                return json.loads(r.read().decode())
+
+        def fetch() -> tuple[list[str], dict[str, str]]:
+            products = get_json(_PRODUCTS_URL)
+            ids = sorted(
+                p["id"] for p in products
                 if p.get("status") == "online"
                 and not p.get("trading_disabled", False)
                 and p.get("quote_currency") in ("USD", "USDC")
             )
+            # /currencies maps a base asset to its human name (BTC -> Bitcoin).
+            # One extra request at boot; the result is small and never changes
+            # during a session.
+            try:
+                by_code = {c["id"]: c["name"] for c in get_json(_CURRENCIES_URL) if c.get("name")}
+            except Exception:  # noqa: BLE001 - names are cosmetic, never fatal
+                by_code = {}
+            names = {}
+            for pid in ids:
+                nm = by_code.get(pid.split("-", 1)[0])
+                if nm:
+                    names[pid] = nm
+            return ids, names
 
         try:
             loop = _asyncio.get_running_loop()
-            ids = await loop.run_in_executor(None, fetch)
+            ids, names = await loop.run_in_executor(None, fetch)
             self._catalog = set(ids)
             self.publisher.set_products(ids)
-            print(f"[coinbase] published catalog: {len(ids)} USD/USDC products")
+            if names:
+                self.publisher.set_names(names)
+            print(f"[coinbase] published catalog: {len(ids)} USD/USDC products "
+                  f"({len(names)} named)")
         except Exception as exc:  # noqa: BLE001
             print(f"[coinbase] catalog fetch failed: {exc!r}")
 

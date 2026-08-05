@@ -45,6 +45,10 @@ public:
     std::map<std::string, Quote> snapshot();
     std::vector<double> history(const std::string& symbol);
 
+    // Company name for a watched symbol, or empty until the poller has fetched
+    // it. Cosmetic: the chart falls back to the bare symbol.
+    std::string name(const std::string& symbol);
+
     // Drains queued error strings (network/auth/parse failures) for the
     // engine to fold into its own event log.
     std::vector<std::string> errors();
@@ -64,6 +68,7 @@ private:
     std::mutex data_mu_;
     std::map<std::string, Quote> quotes_;
     std::map<std::string, std::vector<double>> bars_;
+    std::map<std::string, std::string> names_;
     std::map<std::string, TimestampNs> last_quote_fetch_;
     std::map<std::string, TimestampNs> last_bars_fetch_;
 

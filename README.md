@@ -141,15 +141,45 @@ mkdir -p json && curl -fsSL -o json/json.hpp \
 cd ../..
 ```
 
-Optional, to enable the Stocks tab (Alpaca's free market-data plan). Without
-these the terminal runs crypto-only:
+### 2. Alpaca keys (optional — enables the Stocks tab)
+
+Without these the terminal runs crypto-only and the Stocks tab says so.
+
+Everything the app needs lives in the repo. Copy the template and fill it in:
 
 ```bash
-export ALPACA_API_KEY_ID="..."
-export ALPACA_API_SECRET_KEY="..."
+cp .env.example .env
 ```
 
-### 2. Run
+Then uncomment these two lines in `.env`:
+
+```
+ALPACA_API_KEY_ID=PK...
+ALPACA_API_SECRET_KEY=...
+```
+
+`.env` is gitignored, so real keys stay out of git — `git add .env` is refused.
+`.env.example` is the committed template and should never hold real keys.
+
+`scripts/run.sh` sources `.env` and reports which mode it's in:
+
+```
+[run] loaded /path/to/execution-layer/.env
+[run] Alpaca configured -- Stocks tab enabled
+```
+
+`.env` also carries the optional feed-port and feedhandler tuning variables; see
+the comments in the file.
+
+Free keys from [alpaca.markets](https://alpaca.markets) are enough — the "Basic"
+plan gives real IEX-venue quotes and daily bars. No trading permission is needed,
+since this app never routes real orders.
+
+The keys are read once, when the desk starts, so I restart the terminal after
+editing `.env`. A bad key shows up as an `alpaca HTTP 401` line in the Event Log
+rather than failing silently.
+
+### 3. Run
 
 ```bash
 scripts/run.sh
@@ -169,7 +199,7 @@ scripts/run.sh --no-feed                  # terminal alone
 With no symbol list, Coinbase boots the full top-crypto universe (~95 live USD
 products), so Market Watch is populated immediately.
 
-### 3. Trade
+### 4. Trade
 
 1. Enter a starting balance and click **START DESK**.
 2. Market Watch fills with the live crypto universe. If Alpaca is configured,
@@ -241,6 +271,7 @@ execution-layer/
     Makefile               build (make gui / make all / make alpaca-test)
     README.md              terminal design + build detail
   scripts/run.sh           build and run everything
+  .env.example             template for .env (gitignored local config/keys)
   architecture.md          system design, data flow, and rationale
 ```
 
