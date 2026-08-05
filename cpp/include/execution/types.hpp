@@ -3,8 +3,8 @@
 //
 // These are deliberately plain structs/enums with no dependencies: the OMS,
 // risk manager, matching engine, and strategies all speak in terms of them.
-// They mirror the concepts the Python/KDB+ side already produces (a `Signal`
-// is what the Analysis Engine will publish into the KDB+ `signal` table).
+// They mirror the concepts the feedhandler already produces (a `Signal` is what
+// a future analysis layer would emit for the OMS to act on).
 // ============================================================================
 #pragma once
 
@@ -23,8 +23,9 @@ inline const char* to_string(Side s) { return s == Side::Buy ? "BUY" : "SELL"; }
 inline Side opposite(Side s) { return s == Side::Buy ? Side::Sell : Side::Buy; }
 inline double signed_qty(Side s, double qty) { return s == Side::Buy ? qty : -qty; }
 
-// Which market a symbol belongs to. Crypto flows live via Coinbase -> KDB+;
-// Stock flows via the Alpaca REST client (see alpaca_client.hpp/stock_feed.hpp).
+// Which market a symbol belongs to. Crypto flows in via the feedhandler ->
+// FeedServer -> MarketStore; stocks via the Alpaca REST client
+// (see alpaca_client.hpp/stock_feed.hpp).
 // The OMS, risk manager, and matching engine are asset-agnostic -- they only
 // ever see a Quote/Order/Fill, never this tag. It exists purely so the engine
 // can route control-plane actions (AddSymbol) and the GUI can label rows.
@@ -51,7 +52,7 @@ inline const char* to_string(OrderStatus s) {
 }
 
 // Top-of-book snapshot -- the execution layer's view of the market. Populated
-// today by the mock source; later by the KDB+ RDB (quote table).
+// by MarketStore (crypto) and StockFeed (stocks).
 struct Quote {
     std::string symbol;
     double bid = 0.0;
@@ -79,8 +80,8 @@ struct Quote {
     }
 };
 
-// A trade intention emitted by a Strategy (or, later, read from the KDB+
-// `signal` table produced by the Python Analysis Engine).
+// A trade intention emitted by the GUI order ticket today, or by a strategy /
+// analysis layer later.
 struct Signal {
     std::string symbol;
     Side side = Side::Buy;

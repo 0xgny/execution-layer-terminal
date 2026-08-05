@@ -43,6 +43,13 @@ class FeedPublisher:
         self._rbuf = b""
         self._next_retry = 0.0
         self._announced = False
+        # Catalog and streaming set are *state*, not events: the terminal needs
+        # them whenever it attaches, and it usually attaches long after we send
+        # them the first time (we start before it, and it only opens its socket
+        # on START DESK). Cache them and resend on every connect, or the Ticker
+        # Search is empty for the whole session.
+        self._last_products: list[str] = []
+        self._last_universe: list[str] = []
         self.connect()
 
     # -- connection ---------------------------------------------------------
@@ -62,6 +69,7 @@ class FeedPublisher:
             self._rbuf = b""
             self._announced = False
             print(f"[publisher] connected to terminal at {self._host}:{self._port}")
+            self._resync()
             return True
         except OSError:
             if not self._announced:
@@ -80,15 +88,27 @@ class FeedPublisher:
         self._rbuf = b""
         print("[publisher] terminal disconnected; will reconnect")
 
-    def _send(self, msg: dict) -> bool:
-        if not self.connect():
-            return False
+    def _write(self, msg: dict) -> bool:
+        """Write to an already-established socket. Never calls connect(), so it's
+        safe to use from inside connect() itself."""
         try:
             self._sock.sendall((json.dumps(msg, separators=(",", ":")) + "\n").encode())
             return True
         except OSError:
             self._drop()
             return False
+
+    def _resync(self) -> None:
+        """Push cached state to a freshly attached terminal."""
+        if self._last_products:
+            self._write({"m": "products", "syms": self._last_products})
+        if self._last_universe and self._sock is not None:
+            self._write({"m": "universe", "syms": self._last_universe})
+
+    def _send(self, msg: dict) -> bool:
+        if not self.connect():
+            return False
+        return self._write(msg)
 
     # -- publish paths ------------------------------------------------------
     def publish_trades(self, trades: list[Trade]) -> None:
@@ -138,13 +158,16 @@ class FeedPublisher:
         return [str(s) for s in msg.get("syms", [])]
 
     def set_products(self, ids: list[str]) -> None:
-        """Publish the catalog of tradable products for the terminal to browse."""
-        self._send({"m": "products", "syms": list(ids)})
+        """Publish the catalog of tradable products for the terminal to browse.
+        Cached, so a terminal that attaches later still gets it."""
+        self._last_products = list(ids)
+        self._send({"m": "products", "syms": self._last_products})
 
     def set_universe(self, ids: list[str]) -> None:
         """Publish the set of symbols the feed is actually streaming, so the
-        terminal can auto-populate its watch list at boot."""
-        self._send({"m": "universe", "syms": list(ids)})
+        terminal can auto-populate its watch list at boot. Cached, as above."""
+        self._last_universe = list(ids)
+        self._send({"m": "universe", "syms": self._last_universe})
 
     def close(self) -> None:
         if self._sock is not None:

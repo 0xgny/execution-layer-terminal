@@ -12,7 +12,7 @@
 //
 // Threading: not thread-safe by itself (each call opens its own libcurl easy
 // handle, so concurrent calls from different threads are fine in practice, but
-// treat one instance as owned by one thread, same discipline as KdbClient).
+// treat one instance as owned by one thread).
 // ============================================================================
 #pragma once
 
@@ -35,7 +35,7 @@ public:
     std::optional<Quote> latest_quote(const std::string& symbol);
 
     // Closing prices of the last `n` daily bars, oldest first (same ordering
-    // the Price Chart already expects from KdbClient::history).
+    // the Price Chart already expects from MarketStore::history).
     std::vector<double> daily_bars(const std::string& symbol, int n);
 
     const std::string& last_error() const { return err_; }

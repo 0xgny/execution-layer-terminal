@@ -1,6 +1,6 @@
 """MockFeedHandler: synthetic ticks with no network dependency.
 
-Purpose: prove the entire pipeline (feedhandler -> tickerplant -> RDB -> query)
+Purpose: prove the entire pipeline (feedhandler -> terminal -> quotes/chart)
 end to end without touching the internet or an exchange. It generates a plausible
 random walk per symbol so downstream analytics have realistic-looking data.
 

@@ -3,17 +3,23 @@ __pycache__/
 *.pyc
 logs/*.log
 .DS_Store
-# KDB+ on-disk HDB (added in a later phase)
-hdb/
+
 # C++ build artifacts
 cpp/build/
-# macOS packaging output (.app + .dmg), regenerate with scripts/make_dmg.sh
-dist/
+
 # Vendored GUI libs (fetch via cpp/README setup step)
 cpp/third_party/imgui/
 cpp/third_party/implot/
 cpp/third_party/json/
-designReview*
-simplificationPlan*
-# ImGui layout written next to wherever the terminal is launched from
+
+# ImGui writes its layout next to wherever the terminal was launched from
 /imgui.ini
+
+# Personal working notes -- not for the public repo
+private-docs/
+
+# Packaging / distribution, on hold until Developer ID signing is sorted
+packaging/
+assets/
+dist/
+/build/

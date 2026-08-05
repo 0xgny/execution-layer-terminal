@@ -29,6 +29,7 @@ void TradingEngine::start() {
 void TradingEngine::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
+    feed_proc_.stop();  // before feed_, so the child's socket closes first
     feed_.stop();
     stocks_.stop();
 }
@@ -54,8 +55,16 @@ void TradingEngine::run() {
     constexpr auto kCatalogEvery = std::chrono::seconds(2);
 
     pf_.fund(initial_capital_);
-    if (!feed_.start()) log("feed socket failed: " + feed_.last_error());
-    else log("listening for feedhandler on 127.0.0.1:" + std::to_string(feed_.port()));
+    if (!feed_.start()) {
+        log("feed socket failed: " + feed_.last_error());
+    } else {
+        log("listening for feedhandler on 127.0.0.1:" + std::to_string(feed_.port()));
+        // Packaged builds start their own feedhandler; dev trees don't have one
+        // bundled and expect scripts/run.sh, so "not bundled" is silent.
+        if (feed_proc_.start(feed_.port())) log("started bundled feedhandler");
+        else if (feed_proc_.last_error() != "not bundled")
+            log("feedhandler launch failed: " + feed_proc_.last_error());
+    }
 
     while (running_) {
         // 1. drain commands

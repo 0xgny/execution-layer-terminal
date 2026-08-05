@@ -1,7 +1,7 @@
 # Execution Layer -- C++ terminal
 
 The execution half of the platform: a paper-trading terminal that trades on live
-live Coinbase market data, plus stocks via Alpaca's free
+Coinbase market data, plus stocks via Alpaca's free
 market-data API. It turns user actions into orders, gates them through risk
 controls, fills them on a paper matching engine, and shows real-time PnL --
 rendered as a Bloomberg-terminal-style docked GUI (Dear ImGui + ImPlot). Paper
@@ -82,9 +82,9 @@ never close to the limit even with dozens of symbols watched.
 ### 3. Bring up the crypto data stack (from the project root)
 
 ```bash
-scripts/run_stack.sh coinbase          # boots the ~95-symbol top-crypto universe
+scripts/run.sh coinbase               # boots the ~95-symbol top-crypto universe
 # or a specific set:
-scripts/run_stack.sh coinbase BTC-USD,ETH-USD
+scripts/run.sh coinbase BTC-USD,ETH-USD
 ```
 
 ### 4. Build and run
@@ -124,7 +124,7 @@ On launch, enter your initial capital, hit START DESK, and you get a tiled desk:
 
 Selecting a new ticker posts an `AddSymbol` command, the engine calls `.u.addsym`
 in the store, the Python feedhandler polls for it and sends a live
-subscribe to Coinbase for the new product, its ticks flow into the RDB, and the
+subscribe to Coinbase for the new product, its ticks flow into the store, and the
 terminal charts and trades it. All at runtime, no restart. The product catalog is
 fetched once by the feedhandler (Coinbase REST) and published into the store
 for the terminal to browse.
@@ -140,7 +140,7 @@ Note: the vendored ImPlot is `master`; line colors are set via
 
 ```bash
 make all              # builds selftest and engine_test
-make run-selftest     # single-threaded live buy / PnL / flatten against the RDB
+make run-selftest     # offline: asserts the OMS / risk / PnL pipeline
 make engine-test      # exercises the threaded engine + command/view handoff
 make alpaca-test      # verifies Alpaca auth + quote/bars parsing (needs env vars set)
 ```
@@ -156,6 +156,7 @@ make alpaca-test      # verifies Alpaca auth + quote/bars parsing (needs env var
 | `oms.hpp` / `oms.cpp` | `OrderManager`: state machine, buying-power / no-short gates, routing |
 | `market_store.hpp` / `market_store.cpp` | in-process last-value cache + bounded price history + catalog |
 | `feed_server.hpp` / `feed_server.cpp` | localhost NDJSON socket the feedhandler publishes into |
+| `feed_process.hpp` / `feed_process.cpp` | spawns the bundled feedhandler in packaged builds (no-op in a dev tree) |
 | `alpaca_client.hpp` / `alpaca_client.cpp` | libcurl REST client for Alpaca quotes + daily bars |
 | `stock_feed.hpp` / `stock_feed.cpp` | background poller wrapping `AlpacaClient`, own thread |
 | `engine.hpp` / `engine.cpp` | `TradingEngine`: background thread, `EngineView`, `Command`s |

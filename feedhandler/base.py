@@ -6,8 +6,8 @@ Responsibilities that live here (so subclasses don't repeat them):
 
 A concrete subclass only implements :meth:`_run`, whose job is to read from its
 exchange and call :meth:`emit_trade` / :meth:`emit_quote` with normalized ticks.
-This is the abstraction that lets us add Coinbase later as a sibling class
-without touching anything downstream -- see architecture.md
+This is the abstraction that lets Coinbase, Binance, and the offline mock feed
+be siblings without touching anything downstream -- see architecture.md
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from .schema import Quote, Trade
 
 
 class BaseFeedHandler(abc.ABC):
-    #: short venue tag written into every tick's ``exch`` column
+    #: short venue tag recorded on every tick's ``exchange`` field
     exchange_name: str = "base"
 
     def __init__(self, config: Config, publisher: FeedPublisher) -> None:
@@ -76,7 +76,7 @@ class BaseFeedHandler(abc.ABC):
 
     # -- flush machinery ----------------------------------------------------
     def _flush(self) -> None:
-        """Swap out the buffers and ship them. Runs on the executor thread."""
+        """Swap out the buffers and ship them."""
         if self._trades:
             trades, self._trades = self._trades, []
             self.publisher.publish_trades(trades)
@@ -104,7 +104,7 @@ class BaseFeedHandler(abc.ABC):
             )
 
     async def _control_loop(self) -> None:
-        """Poll the tickerplant for terminal-requested symbols and subscribe to
+        """Poll the terminal for requested symbols and subscribe to
         any that aren't streaming yet. This is the control plane that lets the
         C++ terminal add arbitrary tickers at runtime."""
         while self._running:

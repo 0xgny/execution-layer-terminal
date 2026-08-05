@@ -51,8 +51,9 @@ public:
     // --- reader half: called from the engine thread -------------------------
     bool connected() const { return feed_attached_; }
 
-    // Latest top-of-book for each requested symbol. Symbols with no tick yet
-    // are omitted, matching what the RDB's `snap` returned.
+    // Latest top-of-book for each requested symbol. Symbols that haven't ticked
+    // yet are omitted rather than returned empty, so the caller can tell "no
+    // data yet" from "quoted at zero" -- the GUI shows "..." for the former.
     std::vector<Quote> snapshot(const std::vector<std::string>& symbols) const;
 
     // Last `n` trade prices for `symbol`, oldest first.
