@@ -1,0 +1,4 @@
+# Build-time only -- not needed to run the feedhandler.
+# Used by scripts/make_dmg.sh to freeze the feedhandler into the .app bundle.
+-r requirements.txt
+pyinstaller>=6.0

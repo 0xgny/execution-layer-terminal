@@ -2,10 +2,11 @@
 
 Every exchange speaks its own wire format. Each ``BaseFeedHandler`` subclass is
 responsible for translating that format into these two neutral dataclasses, so
-everything downstream (the publisher, the KDB+ store, analytics, execution)
-only ever sees one schema regardless of venue.
+everything downstream (the publisher, the terminal's store, execution) only ever
+sees one schema regardless of venue.
 
-These fields map 1:1 onto the columns in ``kdb/schema.q``.
+The publisher sends a subset of these over the wire -- see publisher.py for which
+fields the terminal actually consumes.
 """
 
 from __future__ import annotations

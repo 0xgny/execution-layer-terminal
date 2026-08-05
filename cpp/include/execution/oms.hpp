@@ -1,7 +1,7 @@
 // ============================================================================
 // oms.hpp -- Order Management System: the heart of the execution layer.
 //
-// Turns a Signal (from a strategy, the GUI order ticket, or later the KDB+
+// Turns a Signal (from the GUI order ticket, or later a strategy or
 // `signal` table) into an Order, gates it, routes it to the matching engine,
 // and applies fills to the Portfolio. Enforces a legal order state machine.
 //

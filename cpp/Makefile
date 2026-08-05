@@ -24,7 +24,7 @@ CURL_LDFLAGS := -lcurl
 
 CORE   := $(BUILD)/oms.o $(BUILD)/risk.o $(BUILD)/matching.o
 ENGINE := $(BUILD)/engine.o $(BUILD)/market_store.o $(BUILD)/feed_server.o \
-          $(BUILD)/alpaca_client.o $(BUILD)/stock_feed.o
+          $(BUILD)/feed_process.o $(BUILD)/alpaca_client.o $(BUILD)/stock_feed.o
 
 # --- GUI (Dear ImGui + ImPlot + GLFW) --------------------------------------
 IMGUI_DIR    := third_party/imgui

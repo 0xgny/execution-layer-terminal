@@ -44,6 +44,7 @@ rows in Sec. 2 describe intended end state, not current code.
 |---|---|---|---|---|
 | `feedhandler/` | Python | -- | Built | Normalize a crypto exchange stream (Coinbase live; Binance/mock also implemented) -> publish to the terminal |
 | `FeedServer` | C++ | 5020 | Built | Localhost socket the feedhandler publishes into; decodes NDJSON batches |
+| `FeedProcess` | C++ | -- | Built | Launches + supervises the bundled feedhandler in packaged builds |
 | `MarketStore` | C++ | -- | Built | In-process last-value cache + bounded per-symbol price history + catalog |
 | Execution core (`cpp/`) | C++ | -- | Built | OMS state machine, risk gate + kill switch, paper matching |
 | `AlpacaClient` / `StockFeed` | C++ | -- | Built | libcurl REST client + background poller for Alpaca (IEX) stock quotes/bars |
@@ -173,6 +174,31 @@ that produces signals and the history to compute them over.
 - **Backpressure / drop policy** if the terminal can't keep up. Today the socket
   buffer plus the feedhandler's own flush batching absorb it, and a stalled
   terminal shows as a disconnect rather than unbounded growth.
+
+## 6a. Packaging
+
+`scripts/make_dmg.sh` produces a self-contained macOS `.app`:
+
+- `Contents/MacOS/terminal` -- the C++ binary
+- `Contents/Frameworks/` -- non-system dylibs (Homebrew glfw), install names
+  rewritten to `@rpath` so no Homebrew is needed on the target machine
+- `Contents/Resources/feedhandler/` -- the Python feedhandler frozen with
+  PyInstaller (onedir), carrying its own interpreter, `websockets`, and `certifi`
+
+A shell launcher sets `EL_FEEDHANDLER` to the frozen binary and `cd`s to
+Application Support (Finder starts apps with `cwd=/`, where ImGui could not
+write its layout). `FeedProcess` reads that variable on START DESK and spawns the
+child; when it is unset -- a source checkout -- it does nothing and you run
+`scripts/run_stack.sh` yourself.
+
+Two details that are easy to get wrong and both cost a working restart:
+
+- The child is spawned with `--exit-when-orphaned`, so it polls `getppid()` and
+  quits if the terminal dies without reaping it. Otherwise a crash leaves a feed
+  streaming Coinbase forever.
+- `FeedServer`'s listening and accepted sockets are `FD_CLOEXEC`. Without that
+  the child inherits the listening socket, and an orphan holds port 5020 -- the
+  next launch then fails to bind against a process that isn't even the terminal.
 
 ## 7. Why this shape
 

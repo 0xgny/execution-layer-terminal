@@ -4,11 +4,17 @@
 #
 # Steps:
 #   1. make gui                       (cpp/build/terminal)
-#   2. wrap it in dist/<App>.app      (Info.plist + icon + launcher)
-#   3. copy non-system dylibs (Homebrew glfw) into Contents/Frameworks and
+#   2. PyInstaller the feedhandler    (Contents/Resources/feedhandler/)
+#   3. wrap both in dist/<App>.app    (Info.plist + icon + launcher)
+#   4. copy non-system dylibs (Homebrew glfw) into Contents/Frameworks and
 #      rewrite the install names, so the app runs on a machine without brew
-#   4. ad-hoc codesign
-#   5. hdiutil -> dist/<App>-<version>.dmg with an /Applications drop target
+#   5. ad-hoc codesign
+#   6. hdiutil -> dist/<App>-<version>.dmg with an /Applications drop target
+#
+# The result needs nothing installed on the target machine: no Homebrew, no
+# Python, no runtime of any kind.
+# Set EL_SKIP_FEED=1 to build a terminal-only bundle (much faster; the app then
+# expects you to run scripts/run_stack.sh yourself).
 #
 # Usage:
 #   scripts/make_dmg.sh                 # version 1.0.0, ad-hoc signature
@@ -49,6 +55,37 @@ if [[ ! -f assets/icon.icns ]]; then
 fi
 cp assets/icon.icns "$RESOURCES/icon.icns"
 
+# --- feedhandler ------------------------------------------------------------
+# Frozen with PyInstaller in onedir mode: a real executable plus its own Python
+# runtime and deps (websockets, certifi). Nothing is installed on the target
+# machine. onedir over onefile because onefile unpacks to a temp dir on every
+# launch, which is slower and shows up as a mystery process.
+if [[ "${EL_SKIP_FEED:-0}" == "1" ]]; then
+  echo "[make_dmg] EL_SKIP_FEED=1, terminal-only bundle"
+else
+  PY="${PYTHON:-$ROOT/.venv/bin/python}"
+  if ! "$PY" -c "import PyInstaller" 2>/dev/null; then
+    echo "[make_dmg] ERROR: PyInstaller not available in $PY" >&2
+    echo "[make_dmg]   $PY -m pip install pyinstaller" >&2
+    exit 1
+  fi
+  echo "[make_dmg] freezing feedhandler"
+  rm -rf build/pyinstaller
+  "$PY" -m PyInstaller \
+    --name feedhandler \
+    --distpath "$RESOURCES" \
+    --workpath build/pyinstaller \
+    --specpath build/pyinstaller \
+    --noconfirm --clean --log-level WARN \
+    --paths "$ROOT" \
+    --hidden-import feedhandler.coinbase \
+    --hidden-import feedhandler.binance \
+    --hidden-import feedhandler.mock \
+    scripts/feedhandler_entry.py
+  [[ -x "$RESOURCES/feedhandler/feedhandler" ]] \
+    || { echo "[make_dmg] ERROR: feedhandler not produced" >&2; exit 1; }
+fi
+
 # --- bundle non-system dylibs ----------------------------------------------
 # Worklist over the dependency graph: anything not under /usr/lib or /System
 # gets copied in and re-pointed at @executable_path/../Frameworks. Today that
@@ -83,13 +120,19 @@ echo "[make_dmg] bundled: ${copied[*]:-none}"
 # writable dir (so ImGui can persist imgui.ini) and sources ~/.execution-layer.env
 # if present, which is how ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY reach the
 # app when it is not started from a terminal.
+#
+# EL_FEEDHANDLER tells the terminal where the bundled feed lives; without it
+# (a dev build) the terminal launches nothing and waits for you to run one.
 cat >"$MACOS_DIR/$APP_NAME" <<LAUNCHER
 #!/bin/bash
+HERE="\$(cd "\$(dirname "\$0")" && pwd)"
 SUPPORT="\$HOME/Library/Application Support/$APP_NAME"
 mkdir -p "\$SUPPORT"
 cd "\$SUPPORT"
 [[ -f "\$HOME/.execution-layer.env" ]] && set -a && . "\$HOME/.execution-layer.env" && set +a
-exec "\$(dirname "\$0")/terminal" "\$@"
+FEED="\$HERE/../Resources/feedhandler/feedhandler"
+[[ -x "\$FEED" ]] && export EL_FEEDHANDLER="\$FEED"
+exec "\$HERE/terminal" "\$@"
 LAUNCHER
 chmod +x "$MACOS_DIR/$APP_NAME"
 
@@ -120,6 +163,17 @@ for lib in "$FRAMEWORKS"/*.dylib; do
   [[ -e "$lib" ]] || continue
   codesign --force --timestamp=none -s "$CODESIGN_ID" "$lib"
 done
+
+# PyInstaller ships its own Python runtime plus a tree of .so/.dylib extension
+# modules. Each is Mach-O code and has to be signed individually, innermost
+# first, or --deep --strict rejects the bundle.
+if [[ -d "$RESOURCES/feedhandler" ]]; then
+  echo "[make_dmg] signing feedhandler payload"
+  find "$RESOURCES/feedhandler" \( -name '*.so' -o -name '*.dylib' \) -type f -print0 \
+    | xargs -0 -I{} codesign --force --timestamp=none -s "$CODESIGN_ID" {}
+  codesign --force --timestamp=none -s "$CODESIGN_ID" "$RESOURCES/feedhandler/feedhandler"
+fi
+
 codesign --force --timestamp=none -s "$CODESIGN_ID" "$MACOS_DIR/terminal"
 codesign --force --timestamp=none -s "$CODESIGN_ID" "$APP"
 codesign --verify --deep --strict "$APP"

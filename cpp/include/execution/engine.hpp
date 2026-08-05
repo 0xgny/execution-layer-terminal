@@ -23,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "execution/feed_process.hpp"
 #include "execution/feed_server.hpp"
 #include "execution/market_store.hpp"
 #include "execution/matching.hpp"
@@ -104,9 +105,10 @@ private:
     std::vector<std::string> symbols_;  // engine-thread owned
     double initial_capital_;
 
-    MarketStore store_;  // crypto quotes/history/catalog (declare before feed_)
-    FeedServer feed_;    // accepts the Python feedhandler, own thread
-    StockFeed stocks_;   // Alpaca poller, own thread (stocks)
+    MarketStore store_;   // crypto quotes/history/catalog (declare before feed_)
+    FeedServer feed_;     // accepts the Python feedhandler, own thread
+    FeedProcess feed_proc_;  // launches that feedhandler when we're a .app
+    StockFeed stocks_;    // Alpaca poller, own thread (stocks)
     Portfolio pf_;
     RiskManager risk_;
     PaperMatchingEngine matcher_;

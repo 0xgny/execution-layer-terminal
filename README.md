@@ -6,10 +6,9 @@ IEX-venue real-time quotes + historical daily bars). A C++ "Bloomberg-style"
 terminal consumes both to let you trade a simulated account with real-time PnL,
 live price and PnL charts, and an order blotter.
 
-It fuses two earlier projects:
-
-- q-sim: a KDB+/PyKX real-time tick pipeline (the streaming half)
-- Stock-Analysis-Engine: statistical / ML market analysis (the research half)
+It grew out of q-sim, an earlier KDB+/PyKX tick pipeline; the streaming design
+carried over, the KDB+ dependency did not (see `designReview.md`). A research /
+signal layer is planned but **not built** -- see `architecture.md` Sec. 4.
 
 Everything is paper trading. No real orders are ever routed.
 
@@ -52,15 +51,47 @@ stocks).
 > `designReview.md` for the measurements and `simplificationPlan.md` for the
 > migration.
 
-For the system design -- component map, data flow, the q IPC protocol, the
+For the system design -- component map, data flow, the feed wire format, the
 threading model, and what is built vs. planned -- see `architecture.md`.
 
 ---
 
-## Prerequisites
+## Install (macOS)
 
-- macOS (Apple Silicon supported) or Linux
-- Python 3.11+ -- crypto only
+Grab the `.dmg`, drag the app to Applications, done. It bundles its own
+feedhandler and Python runtime -- nothing to install, no Homebrew, no license.
+Crypto streams as soon as you click START DESK.
+
+To build one yourself:
+
+```bash
+.venv/bin/python -m pip install -r feedhandler/requirements-dev.txt  # PyInstaller
+scripts/make_dmg.sh 1.2.0        # -> dist/Execution-Layer-Terminal-1.2.0.dmg
+EL_SKIP_FEED=1 scripts/make_dmg.sh   # terminal only, much faster
+```
+
+The signature is ad-hoc, so a downloaded copy needs right-click -> Open the first
+time (or `xattr -dr com.apple.quarantine`). For wider distribution, sign with a
+Developer ID via `CODESIGN_ID=... scripts/make_dmg.sh` and notarize.
+
+Optional, for the Stocks tab: put your Alpaca keys in `~/.execution-layer.env`,
+which the app sources at launch (Finder gives it no shell environment):
+
+```
+ALPACA_API_KEY_ID=...
+ALPACA_API_SECRET_KEY=...
+```
+
+---
+
+## Prerequisites (building from source)
+
+- macOS on Apple Silicon. **The GUI is macOS-only** as it stands: `cpp/Makefile`
+  links `-framework OpenGL/Cocoa/IOKit/CoreVideo` and resolves GLFW via Homebrew.
+  The headless targets build anywhere; porting the GUI to Linux means an X11/
+  Wayland GLFW backend and dropping the framework flags. Untested there.
+- Python 3.11 (what the feedhandler is developed and tested against; nothing in
+  it should require 3.11 specifically, but newer versions are untested)
 - A C++20 compiler (Apple clang works)
 - For the GUI: GLFW, plus the vendored Dear ImGui, ImPlot, and nlohmann/json (fetched below)
 - libcurl (ships with macOS/most Linux distros) -- for the stock feed
@@ -181,7 +212,9 @@ execution-layer/
     Makefile               build (make gui / make all / make alpaca-test)
     README.md              terminal design + build detail
   scripts/run_stack.sh     launch the feedhandler
-  scripts/make_dmg.sh      package the terminal as a macOS .app + .dmg
+  scripts/make_dmg.sh      package terminal + feedhandler as a macOS .app + .dmg
+  scripts/make_icon.py     generate assets/icon.icns (stdlib only)
+  scripts/feedhandler_entry.py  PyInstaller entry point for the frozen feed
   architecture.md          system design, data flow, and rationale
   designReview.md          objective review of the architecture
   simplificationPlan.md    the KDB+ removal plan this repo followed
@@ -191,7 +224,7 @@ execution-layer/
 
 ## What is verified
 
-Tested end to end on Apple Silicon:
+Tested end to end on Apple Silicon (macOS 26, Python 3.11, Apple clang):
 
 - Coinbase live -> feedhandler -> terminal: real quotes, 407-product catalog.
 - Buying/selling on live prices with correct cash, position, and PnL accounting;

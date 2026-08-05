@@ -3,8 +3,6 @@ __pycache__/
 *.pyc
 logs/*.log
 .DS_Store
-# KDB+ on-disk HDB (added in a later phase)
-hdb/
 # C++ build artifacts
 cpp/build/
 # macOS packaging output (.app + .dmg), regenerate with scripts/make_dmg.sh
@@ -17,3 +15,5 @@ designReview*
 simplificationPlan*
 # ImGui layout written next to wherever the terminal is launched from
 /imgui.ini
+# PyInstaller work dir (scripts/make_dmg.sh)
+/build/

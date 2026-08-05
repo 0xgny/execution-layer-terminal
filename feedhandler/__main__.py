@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 
 from .base import BaseFeedHandler
 from .binance import BinanceFeedHandler
@@ -34,7 +35,32 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--symbols", help="comma-separated tickers, overrides EL_SYMBOLS")
     p.add_argument("--feed-host", help="terminal host, overrides EL_FEED_HOST")
     p.add_argument("--feed-port", type=int, help="terminal port, overrides EL_FEED_PORT")
+    p.add_argument("--exit-when-orphaned", action="store_true",
+                   help="quit if the parent process dies (used by the packaged app, "
+                        "so a crashed terminal can't leave the feed streaming forever)")
     return p.parse_args()
+
+
+async def _watch_parent() -> None:
+    """Resolve to nothing once we've been reparented, i.e. our launcher died.
+
+    getppid() rather than socket state on purpose: when run standalone the feed
+    is *supposed* to sit and wait for the terminal to come back.
+    """
+    while os.getppid() > 1:
+        await asyncio.sleep(1.0)
+    print("[main] parent process exited; shutting down")
+
+
+async def _run(handler: BaseFeedHandler, exit_when_orphaned: bool) -> None:
+    tasks = [asyncio.ensure_future(handler.run())]
+    if exit_when_orphaned:
+        tasks.append(asyncio.ensure_future(_watch_parent()))
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for t in pending:
+        t.cancel()
+    for t in done:
+        t.result()  # re-raise anything the feed died of
 
 
 def main() -> None:
@@ -58,8 +84,8 @@ def main() -> None:
     handler = _VENUES[args.venue](config, publisher)
 
     try:
-        asyncio.run(handler.run())
-    except KeyboardInterrupt:
+        asyncio.run(_run(handler, args.exit_when_orphaned))
+    except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n[main] shutting down (Ctrl-C)")
     finally:
         publisher.close()

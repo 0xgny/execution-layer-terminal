@@ -1,6 +1,7 @@
 #include "execution/feed_server.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -42,6 +43,11 @@ bool FeedServer::start() {
 
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { err_ = "socket() failed"; return false; }
+
+    // Close-on-exec, or the feedhandler we spawn inherits the *listening*
+    // socket. That orphan would then hold port 5020 after we die, and the next
+    // launch would fail to bind. macOS has no SOCK_CLOEXEC, hence fcntl.
+    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
 
     int one = 1;
     ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -85,6 +91,8 @@ void FeedServer::run() {
 
         const int client = ::accept(listen_fd_, nullptr, nullptr);
         if (client < 0) continue;
+
+        ::fcntl(client, F_SETFD, FD_CLOEXEC);  // same reasoning as listen_fd_
 
         int one = 1;
         ::setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
