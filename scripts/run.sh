@@ -37,6 +37,21 @@ else
   SYMBOLS="${2:-BTCUSDT,ETHUSDT}"
 fi
 
+# --- credentials -----------------------------------------------------------
+# Alpaca keys are read from the environment by AlpacaClient at construction.
+# They live in ./.env, which is gitignored -- everything this app needs stays
+# inside the repo. Copy .env.example to .env and fill it in.
+ENV_FILE="${EL_ENV_FILE:-$ROOT/.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a; . "$ENV_FILE"; set +a
+  echo "[run] loaded $ENV_FILE"
+fi
+if [[ -n "${ALPACA_API_KEY_ID:-}" && -n "${ALPACA_API_SECRET_KEY:-}" ]]; then
+  echo "[run] Alpaca configured -- Stocks tab enabled"
+else
+  echo "[run] no Alpaca keys -- crypto only (see README)"
+fi
+
 # --- python ----------------------------------------------------------------
 if [[ -x "$ROOT/.venv/bin/python" ]]; then
   PY="$ROOT/.venv/bin/python"

@@ -12,6 +12,11 @@ cpp/third_party/imgui/
 cpp/third_party/implot/
 cpp/third_party/json/
 
+# Local credentials / config. .env.example is the committed template.
+.env
+*.env
+!.env.example
+
 # ImGui writes its layout next to wherever the terminal was launched from
 /imgui.ini
 
