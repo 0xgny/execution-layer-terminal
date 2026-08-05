@@ -1,11 +1,11 @@
 // ============================================================================
 // feed_process.hpp -- Supervises the bundled feedhandler child process.
 //
-// In the .app bundle the Python feedhandler ships alongside the binary (see
-// scripts/make_dmg.sh), and the terminal launches it so the user never has to
-// start anything by hand. In a dev tree it doesn't exist and you run
-// `scripts/run_stack.sh` yourself -- so this is a deliberate no-op unless the
-// launcher points EL_FEEDHANDLER at an executable.
+// In a packaged .app the Python feedhandler ships alongside the binary and the
+// terminal launches it, so nothing has to be started by hand. Running from
+// source there is no bundled feed and `scripts/run.sh` starts one instead -- so
+// this is a deliberate no-op unless something points EL_FEEDHANDLER at an
+// executable.
 //
 // Locating the binary via the environment rather than by deriving it from
 // argv[0] keeps this free of platform executable-path APIs: the .app launcher

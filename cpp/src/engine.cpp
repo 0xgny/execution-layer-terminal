@@ -60,7 +60,7 @@ void TradingEngine::run() {
     } else {
         log("listening for feedhandler on 127.0.0.1:" + std::to_string(feed_.port()));
         // Packaged builds start their own feedhandler; dev trees don't have one
-        // bundled and expect scripts/run_stack.sh, so "not bundled" is silent.
+        // bundled and expect scripts/run.sh, so "not bundled" is silent.
         if (feed_proc_.start(feed_.port())) log("started bundled feedhandler");
         else if (feed_proc_.last_error() != "not bundled")
             log("feedhandler launch failed: " + feed_proc_.last_error());

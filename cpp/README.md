@@ -82,9 +82,9 @@ never close to the limit even with dozens of symbols watched.
 ### 3. Bring up the crypto data stack (from the project root)
 
 ```bash
-scripts/run_stack.sh coinbase          # boots the ~95-symbol top-crypto universe
+scripts/run.sh coinbase               # boots the ~95-symbol top-crypto universe
 # or a specific set:
-scripts/run_stack.sh coinbase BTC-USD,ETH-USD
+scripts/run.sh coinbase BTC-USD,ETH-USD
 ```
 
 ### 4. Build and run
