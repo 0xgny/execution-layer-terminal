@@ -51,6 +51,18 @@ const ImVec4 kGreen   = ImVec4(0.20f, 0.85f, 0.35f, 1.00f);
 const ImVec4 kRed     = ImVec4(0.95f, 0.25f, 0.25f, 1.00f);
 const ImVec4 kCyan    = ImVec4(0.20f, 0.75f, 0.85f, 1.00f);
 
+// Added later on the web side (frontend/src/theme.css) and back-ported here so
+// the two versions stay one visual language: an explicit border tone, a dimmed
+// secondary text tone, an alternate panel fill for striping/hover, and distinct
+// hover states for the buy/sell buttons.
+const ImVec4 kBorder    = ImVec4(0.165f, 0.165f, 0.200f, 1.00f);  // #2a2a33
+const ImVec4 kTextDim   = ImVec4(0.541f, 0.541f, 0.502f, 1.00f);  // #8a8a80
+const ImVec4 kPanelAlt  = ImVec4(0.098f, 0.098f, 0.133f, 1.00f);  // #191922
+const ImVec4 kBuy       = ImVec4(0.102f, 0.349f, 0.149f, 1.00f);  // #1a5926
+const ImVec4 kBuyHover  = ImVec4(0.133f, 0.431f, 0.188f, 1.00f);  // #226e30
+const ImVec4 kSell      = ImVec4(0.400f, 0.122f, 0.122f, 1.00f);  // #661f1f
+const ImVec4 kSellHover = ImVec4(0.490f, 0.149f, 0.149f, 1.00f);  // #7d2626
+
 ImVec4 pnl_color(double v) { return v >= 0 ? kGreen : kRed; }
 
 // Format a number with thousands separators, e.g. 62558.87 -> "62,558.87".
@@ -77,18 +89,23 @@ void apply_theme() {
     s.WindowBorderSize = 1.0f;
     s.Colors[ImGuiCol_WindowBg] = kBg;
     s.Colors[ImGuiCol_ChildBg] = kPanel;
-    s.Colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.10f, 0.12f, 1.0f);
-    s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.15f, 0.11f, 0.02f, 1.0f);
+    s.Colors[ImGuiCol_TitleBg] = kPanelAlt;
+    s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.102f, 0.086f, 0.063f, 1.0f);  // #1a1610
     s.Colors[ImGuiCol_Text] = kText;
+    s.Colors[ImGuiCol_TextDisabled] = kTextDim;
+    s.Colors[ImGuiCol_Border] = kBorder;
+    s.Colors[ImGuiCol_Separator] = kBorder;
+    s.Colors[ImGuiCol_TableBorderLight] = kBorder;
+    s.Colors[ImGuiCol_TableBorderStrong] = kBorder;
     s.Colors[ImGuiCol_Header] = kAmberDim;
     s.Colors[ImGuiCol_HeaderHovered] = kAmber;
     s.Colors[ImGuiCol_Button] = ImVec4(0.15f, 0.13f, 0.05f, 1.0f);
     s.Colors[ImGuiCol_ButtonHovered] = kAmberDim;
     s.Colors[ImGuiCol_ButtonActive] = kAmber;
-    s.Colors[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.12f, 0.14f, 1.0f);
+    s.Colors[ImGuiCol_FrameBg] = ImVec4(0.118f, 0.118f, 0.149f, 1.0f);  // #1e1e26
     s.Colors[ImGuiCol_TableHeaderBg] = ImVec4(0.12f, 0.10f, 0.04f, 1.0f);
     s.Colors[ImGuiCol_TableRowBg] = kPanel;
-    s.Colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.10f, 0.10f, 0.12f, 1.0f);
+    s.Colors[ImGuiCol_TableRowBgAlt] = kPanelAlt;
 }
 
 // One-time tiled layout: split the dockspace into the classic terminal quadrants.
@@ -401,22 +418,29 @@ int main(int argc, char** argv) {
                 const bool can_sell = has_quote && amount > 0.0 && net_qty > 1e-9;
 
                 ImGui::Spacing();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.35f, 0.15f, 1.0f));
+                // Hover/active pushed too, not just Button: otherwise hovering
+                // BUY falls back to the global amber and the button reads as a
+                // generic action mid-click, which the web version doesn't do.
+                ImGui::PushStyleColor(ImGuiCol_Button, kBuy);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kBuyHover);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, kBuyHover);
                 ImGui::BeginDisabled(!can_buy);
                 if (ImGui::Button("BUY", ImVec2(90, 34)))
                     engine->post({Command::Buy, sym, amount, !ticket_use_qty});
                 ImGui::EndDisabled();
-                ImGui::PopStyleColor();
+                ImGui::PopStyleColor(3);
                 if (!can_buy && ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", !has_quote ? "no live quote yet" : amount <= 0.0 ? "enter an amount" : "no cash available");
                 ImGui::SameLine();
 
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.40f, 0.12f, 0.12f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, kSell);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kSellHover);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, kSellHover);
                 ImGui::BeginDisabled(!can_sell);
                 if (ImGui::Button("SELL", ImVec2(90, 34)))
                     engine->post({Command::Sell, sym, amount, !ticket_use_qty});
                 ImGui::EndDisabled();
-                ImGui::PopStyleColor();
+                ImGui::PopStyleColor(3);
                 if (!can_sell && ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", !has_quote ? "no live quote yet" : net_qty <= 0.0 ? "no open position to sell" : "enter an amount");
                 ImGui::SameLine();
