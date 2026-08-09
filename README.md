@@ -1,6 +1,6 @@
-# Execution Layer
+# Execution Layer Terminal
 
-I built a real-time paper-trading terminal that spans two asset classes. Crypto
+This is a real-time paper-trading terminal that spans two asset classes. Crypto
 streams live from Coinbase; stocks come from Alpaca's free market-data API (real
 IEX-venue quotes plus historical daily bars). A C++ terminal consumes both so I
 can trade a simulated account against real prices, with live PnL, price and PnL
