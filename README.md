@@ -53,9 +53,6 @@ threading model, and what is built versus planned — see `architecture.md`.
 
 ## Why I started with KDB+, and why I moved off it
 
-I want to be upfront about this, because the repo history shows it and I think
-the reasoning on both sides is worth stating.
-
 ### Why I chose KDB+ first
 
 I carried the design over from q-sim, my earlier tick pipeline, and I picked it
@@ -73,25 +70,31 @@ deliberately rather than by inertia:
   volume-reducing aggregations (VWAP, order-flow imbalance, rolling correlation)
   into q on the server rather than shipping millions of rows to Python.
 
-I also wrote the KDB+ client myself. KX doesn't publish its prebuilt C client for
+I also wrote the KDB+ client, before removing it. KX doesn't publish its prebuilt C client for
 arm64 macOS, so I implemented the q IPC handshake and the deserializers I needed
-directly over a socket. That part I'm still proud of.
+directly over a socket.
 
 ### Why I moved off it
 
 Eventually I measured what the application actually asked of the database, and
 the answer was uncomfortable:
 
-- **Two queries.** A per-symbol last-value lookup, and the last 300 trade prices
-  of whichever symbol was charted. That's a hash map and a ring buffer.
-- **Nine of fifteen columns were never read.** The whole `quote` table was
-  write-only — appended to forever, queried by nothing.
-- **I'd hand-written a cache on top of it.** Scanning the growing table was too
-  slow for a 30ms poll, so I maintained my own last-value tables in q. I was
-  using a columnar analytics engine as a hash map, with a hash map bolted on to
-  make it fast enough.
-- **None of the planned analytics existed.** The justification was real, but it
-  was a justification for a system I hadn't built.
+- **The workload didn't justify the machinery.** Two queries — a per-symbol
+  last-value lookup and the last 300 trade prices of the charted symbol — against
+  a `quote` table where nine of fifteen columns were never read. Scanning it was
+  too slow for a 30ms poll, so I maintained my own last-value tables in q: a
+  columnar analytics engine used as a hash map, with a hash map bolted on to make
+  it fast enough. None of the analytics that justified it existed yet.
+- **The complexity was the real cost.** Three processes, two languages, a
+  hand-rolled wire protocol and a licensed database is a lot to hand someone who
+  wants to contribute — you can't run the thing, let alone change it, without a
+  kdb+ license and enough q to debug it. It's also a lot for me to keep alive
+  over years. Every dependency there was one more thing that could rot.
+- **I want this on the web and as a macOS app.** Shipping it that way means
+  shipping whatever it depends on, and a commercial kdb+ license is real friction
+  in that path — for hosting, for distribution, for anyone who just wants to
+  download it and run it. Giving up fractions of a second and using plain old
+  C++ instead is a trade I'll take every time.
 
 The clincher was already in my own repo. The stock path — Alpaca → `AlpacaClient`
 → `StockFeed` → the same `Quote`, the same OMS, the same GUI — reached the exact
@@ -105,7 +108,7 @@ per-symbol price deque, about 150 lines. That deleted two processes, a commercia
 license, 183 lines of q, my 266-line IPC client, and the PyKX dependency that was
 pinning me to Python 3.11 — with **zero** change in what the app does.
 
-### What I gave up, honestly
+### What I gave up
 
 A real analytical engine over history. My store is memory-only and bounded, so
 when I build the analysis layer I'll need durable history — I plan to use Parquet
@@ -217,7 +220,7 @@ products), so Market Watch is populated immediately.
 
 Close the window to stop; the script tears the feed down.
 
-Until I click START DESK the terminal isn't listening, so the feedhandler reports
+Until you click START DESK the terminal isn't listening, so the feedhandler reports
 that it's dropping ticks and retrying. That's expected — the two reconnect to
 each other automatically, in either order.
 
@@ -277,36 +280,6 @@ execution-layer/
 
 ---
 
-## What I've verified
-
-Tested end to end on Apple Silicon (macOS 26, Python 3.11, Apple clang):
-
-- Coinbase live -> feedhandler -> terminal: real quotes, 407-product catalog.
-- Buying and selling on live prices with correct cash, position, and PnL
-  accounting; `engine-test` buys, marks the position as the market moves, then
-  flattens.
-- Control plane: requesting a new ticker at runtime dynamically subscribes the
-  feed and it starts streaming, with no restart.
-- Feedhandler restart and terminal restart in either order, with automatic
-  reconnect in both directions.
-- `selftest` asserts the OMS state machine, risk gates, kill switch, and
-  round-trip PnL arithmetic offline.
-- Parsing unit tests for the Binance and Coinbase wire formats.
-
----
-
-## Known gotchas
-
-- The feedhandler says it's "dropping ticks" until I click START DESK. The
-  terminal only opens its feed socket once the desk is live. It reconnects on its
-  own; nothing to restart.
-- If the terminal logs `bind() failed on port 5020`, another copy is running.
-- TLS behind an intercepting proxy: if the feed hits CERTIFICATE_VERIFY_FAILED,
-  the feedhandler uses certifi by default. For local debugging only I can set
-  `EL_INSECURE_SSL=1` — never for order routing.
-- Binance is geo-blocked in some regions (HTTP 451). I use Coinbase there.
-
----
 
 ## Roadmap
 
