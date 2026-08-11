@@ -51,6 +51,17 @@ inline const char* to_string(OrderStatus s) {
     return "?";
 }
 
+// One point on the Price Chart. The timestamp is what makes the two feeds
+// comparable: crypto arrives as irregular trades, stocks as a 1/s sample with a
+// coarser historical backfill in front of it, so plotting either against sample
+// *index* would stretch and squash time differently in each. Carrying the time
+// lets the chart use a real seconds axis and lets both series say the same
+// thing by the same units.
+struct PricePoint {
+    TimestampNs ts_ns = 0;
+    double price = 0.0;
+};
+
 // Top-of-book snapshot -- the execution layer's view of the market. Populated
 // by MarketStore (crypto) and StockFeed (stocks).
 struct Quote {

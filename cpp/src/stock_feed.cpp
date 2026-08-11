@@ -6,14 +6,24 @@
 namespace el {
 
 namespace {
-constexpr int kQuoteRefreshSecs = 10;
-constexpr int kBarsRefreshSecs = 300;  // daily bars barely change intraday
-constexpr int kBarsLookback = 120;
+// One multi-symbol request per tick, so this is 60 req/min flat -- well inside
+// Alpaca's 200/min free-plan budget regardless of watch-list size.
+constexpr auto kQuoteInterval = std::chrono::milliseconds(1000);
+// After a failed poll, wait this long before the next one. A failure is usually
+// auth, rate limiting, or a dead link -- all of which get worse if we retry at
+// full speed.
+constexpr auto kErrorBackoff = std::chrono::milliseconds(5000);
+// Granularity of the sleep, so stop() is honoured promptly rather than at the
+// end of a full interval.
+constexpr auto kTick = std::chrono::milliseconds(50);
 
-TimestampNs now_ns() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
+// Price to chart for a quote. Prefers the mid, but a single-venue feed like
+// IEX can legitimately show one side empty (see Quote::touch), and averaging in
+// a zero would draw a cliff into the series.
+double chart_price(const Quote& q) {
+    if (q.bid > 0.0 && q.ask > 0.0) return q.mid();
+    if (q.bid > 0.0) return q.bid;
+    return q.ask;
 }
 }  // namespace
 
@@ -41,10 +51,11 @@ std::map<std::string, Quote> StockFeed::snapshot() {
     return quotes_;
 }
 
-std::vector<double> StockFeed::history(const std::string& symbol) {
+std::vector<PricePoint> StockFeed::history(const std::string& symbol) {
     std::lock_guard<std::mutex> lk(data_mu_);
-    auto it = bars_.find(symbol);
-    return it == bars_.end() ? std::vector<double>{} : it->second;
+    auto it = history_.find(symbol);
+    if (it == history_.end()) return {};
+    return std::vector<PricePoint>(it->second.begin(), it->second.end());
 }
 
 std::string StockFeed::name(const std::string& symbol) {
@@ -67,63 +78,93 @@ void StockFeed::note_error(const std::string& e) {
 }
 
 void StockFeed::run() {
+    using clock = std::chrono::steady_clock;
+    auto next_poll = clock::now();  // poll immediately
+
+    // Advance the schedule from the deadline, not from "now". Adding the
+    // interval to the *finish* time would fold each round-trip's latency into
+    // the period, so the samples would drift apart -- and the chart's x-axis is
+    // sample index, which only reads as time if the spacing is uniform.
+    // std::max keeps a slow or backed-off poll from queueing up a burst.
+    auto schedule_next = [&next_poll](std::chrono::milliseconds interval) {
+        next_poll = std::max(next_poll + interval, clock::now());
+    };
+
     while (running_) {
+        if (clock::now() < next_poll) {
+            std::this_thread::sleep_for(kTick);
+            continue;
+        }
+
         std::vector<std::string> syms;
         {
             std::lock_guard<std::mutex> lk(sym_mu_);
             syms = symbols_;
         }
+        if (syms.empty()) {
+            schedule_next(kQuoteInterval);
+            continue;
+        }
 
-        const TimestampNs t = now_ns();
+        // Per-symbol one-time work: the intraday backfill so the chart is
+        // readable the instant a ticker is added, and the display name. Both
+        // are cached even when they come back empty, so a symbol with no bars
+        // (or no asset record) doesn't re-request forever.
         for (const std::string& sym : syms) {
-            if (!running_) break;
+            if (!running_) return;
 
-            bool need_quote, need_bars;
+            bool need_backfill, need_name;
             {
                 std::lock_guard<std::mutex> lk(data_mu_);
-                auto qit = last_quote_fetch_.find(sym);
-                need_quote = (qit == last_quote_fetch_.end()) ||
-                             (t - qit->second) > (TimestampNs)kQuoteRefreshSecs * 1'000'000'000LL;
-                auto bit = last_bars_fetch_.find(sym);
-                need_bars = (bit == last_bars_fetch_.end()) ||
-                            (t - bit->second) > (TimestampNs)kBarsRefreshSecs * 1'000'000'000LL;
-            }
-
-            // Name is immutable, so fetch it once per symbol. Cheap: one extra
-            // request the first time a stock is watched, never again.
-            bool need_name;
-            {
-                std::lock_guard<std::mutex> lk(data_mu_);
+                need_backfill = !backfilled_[sym];
                 need_name = names_.find(sym) == names_.end();
             }
+
+            if (need_backfill) {
+                auto bars = client_.recent_minute_bars(sym, kBackfillMinutes);
+                if (bars.empty()) note_error("alpaca backfill " + sym + ": " + client_.last_error());
+                std::lock_guard<std::mutex> lk(data_mu_);
+                backfilled_[sym] = true;
+                // Prepend: a poll may already have appended live samples while
+                // this request was in flight, and those are newer than any bar.
+                std::deque<PricePoint>& h = history_[sym];
+                h.insert(h.begin(), bars.begin(), bars.end());
+                while (h.size() > kHistoryCap) h.pop_front();
+            }
+
             if (need_name) {
                 std::string nm = client_.asset_name(sym);
                 std::lock_guard<std::mutex> lk(data_mu_);
                 names_[sym] = nm;  // cache even an empty result; don't retry forever
             }
+        }
+        if (!running_) return;
 
-            if (need_quote) {
-                if (auto q = client_.latest_quote(sym)) {
-                    std::lock_guard<std::mutex> lk(data_mu_);
-                    quotes_[sym] = *q;
-                    last_quote_fetch_[sym] = now_ns();
-                } else {
-                    note_error("alpaca quote " + sym + ": " + client_.last_error());
-                    std::lock_guard<std::mutex> lk(data_mu_);
-                    last_quote_fetch_[sym] = now_ns();  // back off; don't hammer on failure
+        auto fresh = client_.latest_quotes(syms);
+        if (fresh.empty()) {
+            note_error("alpaca quotes: " + client_.last_error());
+            schedule_next(kErrorBackoff);
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(data_mu_);
+            for (auto& [sym, q] : fresh) {
+                quotes_[sym] = q;
+                // Sample the series once per poll. Appending unconditionally --
+                // even when the price is unchanged -- is the point: the chart's
+                // x-axis is elapsed polls, so a flat market has to draw a flat
+                // line rather than simply stop advancing.
+                const double px = chart_price(q);
+                if (px > 0.0) {
+                    std::deque<PricePoint>& h = history_[sym];
+                    h.push_back({q.ts_ns, px});
+                    while (h.size() > kHistoryCap) h.pop_front();
                 }
-            }
-
-            if (need_bars) {
-                auto closes = client_.daily_bars(sym, kBarsLookback);
-                std::lock_guard<std::mutex> lk(data_mu_);
-                if (!closes.empty()) bars_[sym] = std::move(closes);
-                else note_error("alpaca bars " + sym + ": " + client_.last_error());
-                last_bars_fetch_[sym] = now_ns();
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        schedule_next(kQuoteInterval);
     }
 }
 

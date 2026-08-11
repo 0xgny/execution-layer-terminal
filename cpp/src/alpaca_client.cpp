@@ -1,6 +1,8 @@
 #include "execution/alpaca_client.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 
@@ -39,6 +41,26 @@ std::string start_date_iso(int n_days_back) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
     return buf;
+}
+
+// Parse an Alpaca RFC-3339 UTC timestamp ("2026-08-10T17:16:00Z", sometimes
+// with fractional seconds) to unix nanoseconds. 0 if it doesn't parse -- the
+// caller only uses these to space points on a time axis, so a bad timestamp
+// should drop that point's position, never fail the whole fetch.
+TimestampNs iso_to_ns(const std::string& s) {
+    std::tm tm{};
+    int year, mon, day, hour, min, sec;
+    if (std::sscanf(s.c_str(), "%d-%d-%dT%d:%d:%d", &year, &mon, &day, &hour, &min, &sec) != 6)
+        return 0;
+    tm.tm_year = year - 1900;
+    tm.tm_mon = mon - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = min;
+    tm.tm_sec = sec;
+    const std::time_t t = timegm(&tm);  // UTC, unlike mktime
+    if (t == static_cast<std::time_t>(-1)) return 0;
+    return static_cast<TimestampNs>(t) * 1'000'000'000LL;
 }
 
 size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -84,28 +106,51 @@ bool AlpacaClient::get(const std::string& path, std::string& body, const char* h
     return true;
 }
 
-std::optional<Quote> AlpacaClient::latest_quote(const std::string& symbol) {
+std::map<std::string, Quote> AlpacaClient::latest_quotes(const std::vector<std::string>& symbols) {
+    if (symbols.empty()) return {};
+
+    std::string list;
+    for (const std::string& s : symbols) {
+        if (!list.empty()) list += ",";
+        list += s;
+    }
+
     std::string body;
     // feed=iex: free/Basic accounts only have IEX access. Omitting `feed`
     // defaults to the consolidated SIP feed, which requires a paid
     // subscription and returns 403 for Basic accounts.
-    if (!get("/v2/stocks/" + symbol + "/quotes/latest?feed=iex", body)) return std::nullopt;
+    if (!get("/v2/stocks/quotes/latest?feed=iex&symbols=" + list, body)) return {};
 
     try {
         json j = json::parse(body);
-        const json& q = j.at("quote");
-        Quote out;
-        out.symbol = symbol;
-        out.bid = q.value("bp", 0.0);
-        out.ask = q.value("ap", 0.0);
-        out.bsize = q.value("bs", 0.0);
-        out.asize = q.value("as", 0.0);
-        out.ts_ns = now_ns();  // receipt time; exact exchange ts not needed for display
+        const auto quotes = j.find("quotes");
+        if (quotes == j.end() || !quotes->is_object()) return {};
+
+        const TimestampNs recv = now_ns();  // receipt time; exact exchange ts not needed for display
+        std::map<std::string, Quote> out;
+        for (auto it = quotes->begin(); it != quotes->end(); ++it) {
+            if (!it.value().is_object()) continue;
+            Quote q;
+            q.symbol = it.key();
+            q.bid = it.value().value("bp", 0.0);
+            q.ask = it.value().value("ap", 0.0);
+            q.bsize = it.value().value("bs", 0.0);
+            q.asize = it.value().value("as", 0.0);
+            q.ts_ns = recv;
+            out[q.symbol] = q;
+        }
         return out;
     } catch (const std::exception& e) {
         err_ = std::string("alpaca parse error: ") + e.what();
-        return std::nullopt;
+        return {};
     }
+}
+
+std::optional<Quote> AlpacaClient::latest_quote(const std::string& symbol) {
+    auto quotes = latest_quotes({symbol});
+    auto it = quotes.find(symbol);
+    if (it == quotes.end()) return std::nullopt;
+    return it->second;
 }
 
 std::vector<double> AlpacaClient::daily_bars(const std::string& symbol, int n) {
@@ -122,6 +167,39 @@ std::vector<double> AlpacaClient::daily_bars(const std::string& symbol, int n) {
         std::vector<double> closes;
         for (const auto& bar : j.at("bars")) closes.push_back(bar.value("c", 0.0));
         return closes;  // Alpaca returns bars oldest-first for a plain limit query
+    } catch (const std::exception& e) {
+        err_ = std::string("alpaca parse error: ") + e.what();
+        return {};
+    }
+}
+
+std::vector<PricePoint> AlpacaClient::recent_minute_bars(const std::string& symbol, int n) {
+    if (n <= 0) return {};
+
+    std::string body;
+    // sort=desc gives the *latest* n bars in one request. Ascending (the
+    // default) would return the oldest n from whatever `start` we guessed, so
+    // getting recent data that way means either paging or over-fetching a whole
+    // session and throwing most of it away.
+    const std::string path = "/v2/stocks/" + symbol + "/bars?timeframe=1Min&limit=" +
+                             std::to_string(n) + "&adjustment=raw&feed=iex&sort=desc";
+    if (!get(path, body)) return {};
+
+    try {
+        json j = json::parse(body);
+        const auto bars = j.find("bars");
+        if (bars == j.end() || !bars->is_array()) return {};
+
+        std::vector<PricePoint> out;
+        out.reserve(bars->size());
+        for (const auto& bar : *bars) {
+            const double close = bar.value("c", 0.0);
+            if (!(close > 0.0)) continue;
+            out.push_back({iso_to_ns(bar.value("t", std::string{})), close});
+        }
+        // Undo sort=desc: everything downstream wants oldest-first.
+        std::reverse(out.begin(), out.end());
+        return out;
     } catch (const std::exception& e) {
         err_ = std::string("alpaca parse error: ") + e.what();
         return {};

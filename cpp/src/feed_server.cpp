@@ -165,8 +165,23 @@ void FeedServer::handle_line(const std::string& line, int client_fd) {
         if (rows == msg.end() || !rows->is_array()) return;
         for (const auto& row : *rows) {
             if (!row.is_array() || row.size() < 3) continue;
-            store_.on_trade(row[0].get<std::string>(), row[1].get<double>());
+            store_.on_trade(row[0].get<std::string>(), row[1].get<double>(),
+                            row[2].get<TimestampNs>());
         }
+        return;
+    }
+
+    if (m == "history") {
+        const std::string sym = msg.value("sym", "");
+        const auto rows = msg.find("rows");
+        if (sym.empty() || rows == msg.end() || !rows->is_array()) return;
+        std::vector<PricePoint> pts;
+        pts.reserve(rows->size());
+        for (const auto& row : *rows) {
+            if (!row.is_array() || row.size() < 2) continue;
+            pts.push_back({row[1].get<TimestampNs>(), row[0].get<double>()});
+        }
+        store_.backfill_history(sym, pts);
         return;
     }
 
@@ -196,6 +211,7 @@ void FeedServer::handle_line(const std::string& line, int client_fd) {
         json reply;
         reply["m"] = "requested";
         reply["syms"] = store_.take_requested();
+        reply["hist"] = store_.take_history_requests();
         send_all(client_fd, reply.dump() + "\n");
         return;
     }

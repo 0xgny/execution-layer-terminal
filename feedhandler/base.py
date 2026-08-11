@@ -106,10 +106,17 @@ class BaseFeedHandler(abc.ABC):
     async def _control_loop(self) -> None:
         """Poll the terminal for requested symbols and subscribe to
         any that aren't streaming yet. This is the control plane that lets the
-        C++ terminal add arbitrary tickers at runtime."""
+        C++ terminal add arbitrary tickers at runtime.
+
+        It also carries chart-backfill requests. Those are terminal-driven for
+        the same reason subscriptions are: only the terminal knows what the user
+        is looking at, and backfilling everything we stream would be ~100 REST
+        requests for charts nobody has open.
+        """
         while self._running:
             await asyncio.sleep(2.0)
-            requested = self.publisher.query_requested()
+            requested, wants_history = self.publisher.query_requested()
+
             new = [s for s in requested if s and s not in self._subscribed]
             if new:
                 try:
@@ -118,6 +125,18 @@ class BaseFeedHandler(abc.ABC):
                     print(f"[{self.exchange_name}] now streaming {new}")
                 except Exception as exc:  # noqa: BLE001
                     print(f"[{self.exchange_name}] subscribe failed for {new}: {exc!r}")
+
+            if wants_history:
+                try:
+                    await self._backfill(wants_history)
+                except Exception as exc:  # noqa: BLE001 - backfill is never fatal
+                    print(f"[{self.exchange_name}] backfill failed for "
+                          f"{wants_history}: {exc!r}")
+
+    async def _backfill(self, syms: list[str]) -> None:
+        """Publish historical chart points for `syms`.
+        Default: no-op (override per venue)."""
+        _ = syms
 
     async def _subscribe_new(self, syms: list[str]) -> None:
         """Subscribe to additional symbols on an already-open stream.

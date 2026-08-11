@@ -36,7 +36,13 @@ class Config:
     # We buffer ticks and flush them to the terminal on a timer to amortize
     # per-message overhead, mirroring the "N ticks per publish" pattern of a
     # real feed.
-    flush_interval_s: float = float(os.environ.get("EL_FLUSH_INTERVAL", "0.25"))
+    #
+    # 100ms rather than the 250ms this used to default to. The batch interval is
+    # the floor on end-to-end tick latency, and at 250ms the chart visibly moved
+    # in four steps a second. A localhost json.dumps + sendall is microseconds,
+    # so the amortization argument is just as satisfied by 100ms and the feed
+    # looks continuous instead of stepped.
+    flush_interval_s: float = float(os.environ.get("EL_FLUSH_INTERVAL", "0.10"))
     max_buffer: int = int(os.environ.get("EL_MAX_BUFFER", "1000"))
 
     # --- Reconnection ------------------------------------------------------

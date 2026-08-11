@@ -76,8 +76,8 @@ export ALPACA_API_SECRET_KEY=...
 
 Alpaca's free "Basic" data plan gives real IEX-venue real-time quotes (not
 delayed) plus historical daily bars, rate-limited to 200 requests/minute --
-`StockFeed` refreshes each watched symbol at most once every 10s, so this is
-never close to the limit even with dozens of symbols watched.
+`StockFeed` refreshes the entire watch list once a second in one multi-symbol
+request, a flat 60 req/min however many symbols are watched.
 
 ### 3. Bring up the crypto data stack (from the project root)
 
@@ -105,7 +105,17 @@ On launch, enter your initial capital, hit START DESK, and you get a tiled desk:
 - Ticker Search -- search/browse the full Coinbase catalog (~400 USD products,
   crypto only -- Alpaca's free plan has no bulk stock catalog); click one and
   the control plane subscribes the feed to it live and charts it
-- Price Chart (ImPlot) -- live last-trade price of the focused symbol (amber)
+- Price Chart (ImPlot) -- live price of the focused symbol (amber) on a real
+  seconds axis, with a 1m/5m/15m/1h/6h timeframe selector (default 5m). Both
+  feeds backfill recent 1-minute history when a symbol is first charted, so it
+  opens with hours of shape instead of blank; live data extends it (the trade
+  tape for crypto, a 1/s sampled mid for stocks, since Alpaca's free plan quotes
+  but doesn't stream trades). The timeframe matters more than it looks: show all
+  the history at once and a second of new ticks moves the line a fraction of a
+  pixel (reads as frozen), show only the last few seconds and tick noise fills
+  the pane (reads as a microscope). The visible Y range is floored at a bound
+  that scales with the square root of the window, since that is how far price
+  diffuses with time.
 - PnL (ImPlot) -- account PnL over time; green while in profit, red while in loss
 - Order Ticket -- pick a symbol (always mirrors whatever's focused elsewhere
   -- Market Watch, Ticker Search, Positions), `$` notional or exact `Qty`
@@ -182,7 +192,7 @@ PnL charts; stocks via Alpaca (real-time IEX quotes + daily bars); Current/Previ
 position history; click-a-position-to-ticket.
 
 Next:
-- Candlestick / OHLC charts + historical backfill (Coinbase REST candles; Alpaca
-  bars are already fetched for stocks but only plotted as a close-price line today).
+- Candlestick / OHLC charts. The backfill already fetches full OHLC bars and
+  keeps only the close, so the data is there -- it's the chart that's a line.
 - Consume signals from an analysis layer.
 - Optional live order routing to an exchange testnet, behind the risk gate.

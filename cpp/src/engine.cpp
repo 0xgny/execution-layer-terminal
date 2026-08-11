@@ -51,7 +51,15 @@ void TradingEngine::log(const std::string& s) {
 
 void TradingEngine::run() {
     using clock = std::chrono::steady_clock;
-    constexpr auto kHistoryEvery = std::chrono::milliseconds(450);
+    // Chart refresh. 450ms used to mean the Price Chart redrew ~2x/s while ticks
+    // arrived far faster than that, so the line advanced in visible steps. This
+    // is a mutexed copy of at most 300 doubles from an in-process cache -- cheap
+    // enough to do on nearly every cycle.
+    constexpr auto kHistoryEvery = std::chrono::milliseconds(100);
+    // Trade points to chart for crypto. 300 was under a minute of tape on a
+    // liquid pair, which is why the chart read as a jittery close-up rather
+    // than a price line; the store keeps kHistoryCap of them.
+    constexpr int kChartPoints = 4096;
     constexpr auto kCatalogEvery = std::chrono::seconds(2);
 
     pf_.fund(initial_capital_);
@@ -86,9 +94,17 @@ void TradingEngine::run() {
         // 3. periodic: price history for the focused symbol, and the product
         //    catalog. Cheaper than doing them every cycle.
         const auto now = clock::now();
+        // Ask the feed for candles the first time we chart a crypto symbol.
+        // Once per symbol per session: the feed streams ~100 products but the
+        // user only ever looks at one chart at a time, so backfilling on focus
+        // is one REST request per symbol actually viewed. (Stocks backfill
+        // themselves inside StockFeed, which owns its own REST client.)
+        if (!focus_.empty() && !is_stock(focus_) && hist_requested_.insert(focus_).second)
+            store_.request_history(focus_);
+
         if (!focus_.empty() && now >= next_history_) {
             price_hist_ = is_stock(focus_) ? stocks_.history(focus_)
-                                           : store_.history(focus_, 300);
+                                           : store_.history(focus_, kChartPoints);
             next_history_ = now + kHistoryEvery;
         }
         for (const auto& e : stocks_.errors()) log(e);
@@ -246,7 +262,18 @@ void TradingEngine::publish() {
     v.focus_name = focus_.empty() ? std::string{}
                  : is_stock(focus_) ? stocks_.name(focus_)
                                     : store_.name(focus_);
-    v.price_history = price_hist_;
+    // Split the series into parallel x/y arrays for ImPlot, converting absolute
+    // timestamps to "seconds ago" against the newest point rather than against
+    // wall-clock now. The two differ when a feed stalls, and anchoring on the
+    // data means a stalled chart holds its shape instead of sliding leftwards
+    // off the axis as if time were still passing in it.
+    v.price_history.reserve(price_hist_.size());
+    v.price_age_s.reserve(price_hist_.size());
+    const TimestampNs newest = price_hist_.empty() ? 0 : price_hist_.back().ts_ns;
+    for (const PricePoint& p : price_hist_) {
+        v.price_history.push_back(p.price);
+        v.price_age_s.push_back(static_cast<double>(p.ts_ns - newest) / 1e9);
+    }
     v.pnl_history.assign(pnl_hist_.begin(), pnl_hist_.end());
     v.equity_history.assign(eq_hist_.begin(), eq_hist_.end());
     v.stocks_enabled = stocks_.configured();

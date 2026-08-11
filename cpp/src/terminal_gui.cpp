@@ -568,25 +568,75 @@ int main(int argc, char** argv) {
                     ImGui::TextDisabled("%s", v.focus_name.c_str());
                 }
             }
-            if (v.price_history.size() >= 2) {
+
+            // Timeframe. This is the single knob that decides whether the chart
+            // reads as "too zoomed in" or as "frozen": the store holds hours of
+            // history, and showing all of it at once means a second of new ticks
+            // moves the line by a fraction of a pixel, while showing only the
+            // last few seconds magnifies tick noise to full height. Neither
+            // constant is right for every symbol, so it's a control.
+            static const double kWindows[] = {60, 300, 900, 3600, 21600};
+            static const char* kWindowLabels[] = {"1m", "5m", "15m", "1h", "6h"};
+            static int tf = 1;  // 5m: wide enough to be a price, short enough to move
+            for (int i = 0; i < IM_ARRAYSIZE(kWindows); ++i) {
+                if (i) ImGui::SameLine();
+                ImGui::RadioButton(kWindowLabels[i], &tf, i);
+            }
+            const double window_s = kWindows[tf];
+
+            // The series is oldest-first and ends at age 0, so the visible slice
+            // is a suffix: walk back to the first point inside the window.
+            std::size_t first = v.price_history.size();
+            while (first > 0 && v.price_age_s[first - 1] >= -window_s) --first;
+            const int n_vis = (int)(v.price_history.size() - first);
+
+            if (n_vis >= 2) {
                 if (ImPlot::BeginPlot("##px", ImVec2(-1, -1), ImPlotFlags_NoLegend | ImPlotFlags_NoMouseText)) {
-                    // Fit X to the data, but give Y ~15% headroom top and bottom so
-                    // the line never hugs the window edges.
-                    double lo = *std::min_element(v.price_history.begin(), v.price_history.end());
-                    double hi = *std::max_element(v.price_history.begin(), v.price_history.end());
-                    double pad = (hi - lo) * 0.15;
-                    if (pad <= 0) pad = std::abs(hi) * 0.001 + 1e-6;
-                    ImPlot::SetupAxes("ticks", "price", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_None);
+                    const double* xs = v.price_age_s.data() + first;
+                    const double* ys = v.price_history.data() + first;
+
+                    // Range over the *visible* slice only. Fitting Y to the whole
+                    // buffer would flatten the window we're actually looking at
+                    // against hours of unrelated range.
+                    double lo = *std::min_element(ys, ys + n_vis);
+                    double hi = *std::max_element(ys, ys + n_vis);
+
+                    // Floor the visible range, so a quiet market isn't magnified
+                    // until tick noise fills the pane -- the chart has to be able
+                    // to draw "barely moved" as a flat line. The floor scales
+                    // with the square root of the window because that is how far
+                    // a price diffuses with time: measured on BTC-USD, a minute
+                    // spans ~0.0001% and six hours ~0.5%, so any single constant
+                    // either flattens the short windows or lets the long ones
+                    // hunt noise. Anchored at 0.4% over 6h. Once the real range
+                    // is wider than the floor this does nothing.
+                    constexpr double kRangeAt6h = 0.004;
+                    const double min_range_pct = kRangeAt6h * std::sqrt(window_s / 21600.0);
+                    const double mid = 0.5 * (lo + hi);
+                    const double min_range = std::abs(mid) * min_range_pct;
+                    if (hi - lo < min_range) {
+                        lo = mid - 0.5 * min_range;
+                        hi = mid + 0.5 * min_range;
+                    }
+                    // ~8% headroom so the line never hugs the window edges.
+                    double pad = (hi - lo) * 0.08;
+                    if (pad <= 0) pad = 1e-6;
+
+                    // X pinned to the window rather than auto-fitted, so the line
+                    // scrolls leftward against a fixed axis instead of the axis
+                    // stretching to swallow each new point (which looks static).
+                    ImPlot::SetupAxes("seconds ago", "price",
+                                      ImPlotAxisFlags_None, ImPlotAxisFlags_None);
+                    ImPlot::SetupAxisLimits(ImAxis_X1, -window_s, 0, ImPlotCond_Always);
                     ImPlot::SetupAxisLimits(ImAxis_Y1, lo - pad, hi + pad, ImPlotCond_Always);
                     ImPlotSpec spec;
                     spec.LineColor = kAmber;
                     spec.LineWeight = 1.6f;
-                    ImPlot::PlotLine(v.focus.c_str(), v.price_history.data(),
-                                     (int)v.price_history.size(), 1.0, 0.0, spec);
+                    ImPlot::PlotLine(v.focus.c_str(), xs, ys, n_vis, spec);
                     ImPlot::EndPlot();
                 }
             } else {
-                ImGui::TextDisabled("waiting for trades...");
+                ImGui::TextDisabled("waiting for ticks...");
             }
             ImGui::End();
 

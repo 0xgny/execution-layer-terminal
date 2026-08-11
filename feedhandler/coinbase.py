@@ -42,7 +42,13 @@ from .schema import Quote, Side, Trade
 _WS_URL = "wss://ws-feed.exchange.coinbase.com"
 _PRODUCTS_URL = "https://api.exchange.coinbase.com/products"
 _CURRENCIES_URL = "https://api.exchange.coinbase.com/currencies"
+_CANDLES_URL = "https://api.exchange.coinbase.com/products/{pid}/candles?granularity=60"
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+# Cap on products backfilled in one control-loop pass. The candles endpoint is
+# one rate-limited request per product, and the terminal normally asks for a
+# single symbol -- this just bounds a pathological batch.
+_MAX_BACKFILL_PRODUCTS = 12
 
 
 def _iso_to_ns(ts: str) -> int:
@@ -67,12 +73,14 @@ class CoinbaseFeedHandler(BaseFeedHandler):
     exchange_name = "coinbase"
     _ws = None       # class default so the control loop can safely check it early
     _catalog = None  # set of valid product ids (once the catalog is fetched)
+    _ssl = None      # shared TLS context, built once in _run
 
     async def _run(self) -> None:
         # Imported lazily so mock/offline runs don't require the websockets dep.
         import websockets
 
         ssl_ctx = self._build_ssl_context()
+        self._ssl = ssl_ctx
         await self._publish_catalog(ssl_ctx)
 
         # Drop any boot symbols that aren't in the live catalog (delisted, typo'd).
@@ -109,6 +117,42 @@ class CoinbaseFeedHandler(BaseFeedHandler):
         if self._ws is not None:
             await self._ws.send(_subscribe_msg(syms))
             self.publisher.set_universe(sorted(set(self._subscribed) | set(syms)))
+
+    async def _backfill(self, product_ids: list[str]) -> None:
+        """Publish recent 1-minute candle closes for the symbols the terminal
+        asked about, so a chart has the last few hours of shape the moment it is
+        opened instead of starting blank and slowly accumulating tape.
+
+        The terminal drops any point that isn't older than the tape it already
+        holds, so overlapping the live stream here is harmless."""
+        import asyncio as _asyncio
+        import urllib.request
+
+        product_ids = product_ids[:_MAX_BACKFILL_PRODUCTS]
+        if not product_ids:
+            return
+
+        def fetch(pid: str) -> list[tuple[float, int]]:
+            req = urllib.request.Request(_CANDLES_URL.format(pid=pid),
+                                         headers={"User-Agent": "execution-layer"})
+            with urllib.request.urlopen(req, timeout=10, context=self._ssl) as r:
+                rows = json.loads(r.read().decode())
+            # Each row is [time_s, low, high, open, close, volume], newest first.
+            # We chart closes, oldest first.
+            out = [(float(row[4]), int(row[0]) * 1_000_000_000) for row in rows
+                   if len(row) >= 5 and float(row[4]) > 0]
+            out.sort(key=lambda p: p[1])
+            return out
+
+        loop = _asyncio.get_running_loop()
+        for pid in product_ids:
+            try:
+                points = await loop.run_in_executor(None, fetch, pid)
+            except Exception as exc:  # noqa: BLE001 - backfill is cosmetic, never fatal
+                print(f"[coinbase] candle backfill failed for {pid}: {exc!r}")
+                continue
+            self.publisher.publish_history(pid, points)
+            print(f"[coinbase] backfilled {len(points)} candles for {pid}")
 
     async def _publish_catalog(self, ssl_ctx) -> None:
         """Fetch the list of tradable USD/USDC products and publish it so the

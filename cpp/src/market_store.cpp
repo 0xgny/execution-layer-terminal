@@ -1,6 +1,7 @@
 #include "execution/market_store.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace el {
 
@@ -10,11 +11,30 @@ void MarketStore::on_quote(const Quote& q) {
     last_quote_[q.symbol] = q;
 }
 
-void MarketStore::on_trade(const std::string& symbol, double price) {
+void MarketStore::on_trade(const std::string& symbol, double price, TimestampNs ts_ns) {
     if (symbol.empty() || !(price > 0.0)) return;
     std::lock_guard<std::mutex> lk(mu_);
-    std::deque<double>& h = history_[symbol];
-    h.push_back(price);
+    std::deque<PricePoint>& h = history_[symbol];
+    h.push_back({ts_ns, price});
+    while (h.size() > kHistoryCap) h.pop_front();
+}
+
+void MarketStore::backfill_history(const std::string& symbol,
+                                   const std::vector<PricePoint>& points) {
+    if (symbol.empty() || points.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    std::deque<PricePoint>& h = history_[symbol];
+    const TimestampNs oldest =
+        h.empty() ? std::numeric_limits<TimestampNs>::max() : h.front().ts_ns;
+
+    std::vector<PricePoint> older;
+    older.reserve(points.size());
+    for (const PricePoint& p : points)
+        if (p.price > 0.0 && p.ts_ns > 0 && p.ts_ns < oldest) older.push_back(p);
+
+    h.insert(h.begin(), older.begin(), older.end());
+    // Trimming from the front discards backfill before live tape, which is the
+    // right precedence when the two together overflow the cap.
     while (h.size() > kHistoryCap) h.pop_front();
 }
 
@@ -46,6 +66,13 @@ std::vector<std::string> MarketStore::take_requested() {
     return out;
 }
 
+std::vector<std::string> MarketStore::take_history_requests() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<std::string> out;
+    out.swap(history_requests_);
+    return out;
+}
+
 std::vector<Quote> MarketStore::snapshot(const std::vector<std::string>& symbols) const {
     std::vector<Quote> out;
     out.reserve(symbols.size());
@@ -57,13 +84,13 @@ std::vector<Quote> MarketStore::snapshot(const std::vector<std::string>& symbols
     return out;
 }
 
-std::vector<double> MarketStore::history(const std::string& symbol, int n) const {
+std::vector<PricePoint> MarketStore::history(const std::string& symbol, int n) const {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = history_.find(symbol);
     if (it == history_.end() || n <= 0) return {};
-    const std::deque<double>& h = it->second;
+    const std::deque<PricePoint>& h = it->second;
     const std::size_t take = std::min(static_cast<std::size_t>(n), h.size());
-    return std::vector<double>(h.end() - static_cast<std::ptrdiff_t>(take), h.end());
+    return std::vector<PricePoint>(h.end() - static_cast<std::ptrdiff_t>(take), h.end());
 }
 
 std::vector<std::string> MarketStore::products() const {
@@ -81,6 +108,14 @@ void MarketStore::add_symbol(const std::string& symbol) {
     std::lock_guard<std::mutex> lk(mu_);
     if (std::find(requested_.begin(), requested_.end(), symbol) == requested_.end())
         requested_.push_back(symbol);
+}
+
+void MarketStore::request_history(const std::string& symbol) {
+    if (symbol.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (std::find(history_requests_.begin(), history_requests_.end(), symbol) ==
+        history_requests_.end())
+        history_requests_.push_back(symbol);
 }
 
 }  // namespace el

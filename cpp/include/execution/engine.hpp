@@ -19,6 +19,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -68,7 +69,13 @@ struct EngineView {
     std::vector<std::string> products;  // catalog for the ticker search (crypto)
     std::string focus;                  // symbol whose chart is populated
     std::string focus_name;             // e.g. "Bitcoin"; empty if unknown
-    std::vector<double> price_history;  // last-trade prices for `focus`
+    // Price Chart series for `focus`, oldest first and the same length. The x
+    // values are seconds relative to now (negative = in the past), so the chart
+    // plots against real elapsed time rather than sample index -- crypto trades
+    // arrive irregularly and the stock series is a minute-bar backfill followed
+    // by 1/s samples, and neither is honest on an index axis.
+    std::vector<double> price_history;  // prices for `focus`
+    std::vector<double> price_age_s;    // matching x values, seconds ago (<= 0)
     std::vector<double> pnl_history;    // account PnL over time
     std::vector<double> equity_history; // account equity over time
     bool stocks_enabled = false;        // true once Alpaca credentials are set
@@ -118,8 +125,9 @@ private:
     std::vector<std::string> stock_symbols_;  // engine-thread owned, parallel to symbols_
 
     std::string focus_;                      // symbol charted in the UI
+    std::set<std::string> hist_requested_;   // crypto symbols we've asked candles for
     std::vector<std::string> products_;      // cached catalog
-    std::vector<double> price_hist_;         // last-trade prices for focus_
+    std::vector<PricePoint> price_hist_;      // chart series for focus_
     std::deque<double> pnl_hist_, eq_hist_;  // account time series (ring)
 
     // Named refresh deadlines. Previously `cycle_ % 15` / `% 66`, which encoded

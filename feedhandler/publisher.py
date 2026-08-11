@@ -9,6 +9,7 @@ Wire format (see cpp/include/execution/feed_server.hpp for the reading half):
 
     {"m":"quotes","rows":[[sym,bid,ask,bsize,asize,ts_ns], ...]}
     {"m":"trades","rows":[[sym,price,ts_ns], ...]}
+    {"m":"history","sym":sym,"rows":[[price,ts_ns], ...]}   # oldest first
     {"m":"products","syms":[...]}
     {"m":"universe","syms":[...]}
     {"m":"names","map":{"BTC-USD":"Bitcoin", ...}}
@@ -37,8 +38,8 @@ from .schema import Quote, Trade
 # backoff: the feed sits disconnected for however long it takes the user to click
 # START DESK, so any backoff has already decayed to its maximum by the exact
 # moment latency matters. A failed connect to a closed loopback port costs
-# microseconds, and connect() is only reached from the flush loop (4x/s) and the
-# control loop, so retrying every time is free.
+# microseconds, and connect() is only reached from the flush loop (10x/s) and
+# the control loop, so retrying every time is free.
 _RETRY_INTERVAL_S = 0.25
 
 
@@ -141,6 +142,23 @@ class FeedPublisher:
             "rows": [[t.symbol, t.price, t.event_time_ns] for t in trades],
         })
 
+    def publish_history(self, symbol: str, points: list[tuple[float, int]]) -> None:
+        """Seed the terminal's chart for `symbol` with historical (price, ts_ns)
+        points, oldest first.
+
+        Not cached for resync, unlike the catalog: this is a point-in-time
+        backfill that goes stale, and the terminal drops anything not older than
+        the tape it already holds. A reconnecting terminal gets a fresh fetch
+        from the subscribe path instead of a replay of this one.
+        """
+        if not points:
+            return
+        self._send({
+            "m": "history",
+            "sym": symbol,
+            "rows": [[p, ts] for p, ts in points],
+        })
+
     def publish_quotes(self, quotes: list[Quote]) -> None:
         if not quotes:
             return
@@ -151,22 +169,29 @@ class FeedPublisher:
         self._send({"m": "quotes", "rows": rows})
 
     # -- control plane ------------------------------------------------------
-    def query_requested(self) -> list[str]:
-        """Symbols the terminal has asked the feed to start streaming."""
+    def query_requested(self) -> tuple[list[str], list[str]]:
+        """Poll the terminal for what it wants from us.
+
+        Returns ``(subscribe, backfill)``: symbols to start streaming, and
+        symbols to fetch chart history for. They are separate lists because the
+        terminal streams far more symbols than it charts -- it asks for candles
+        only for the symbol on screen.
+        """
+        empty: tuple[list[str], list[str]] = ([], [])
         if not self._send({"m": "poll"}):
-            return []
+            return empty
         try:
             self._sock.settimeout(2.0)
             while b"\n" not in self._rbuf:
                 chunk = self._sock.recv(8192)
                 if not chunk:
                     self._drop()
-                    return []
+                    return empty
                 self._rbuf += chunk
             line, _, self._rbuf = self._rbuf.partition(b"\n")
         except OSError:
             self._drop()
-            return []
+            return empty
         finally:
             if self._sock is not None:
                 self._sock.settimeout(None)
@@ -174,10 +199,11 @@ class FeedPublisher:
         try:
             msg = json.loads(line)
         except ValueError:
-            return []
+            return empty
         if msg.get("m") != "requested":
-            return []
-        return [str(s) for s in msg.get("syms", [])]
+            return empty
+        return ([str(s) for s in msg.get("syms", [])],
+                [str(s) for s in msg.get("hist", [])])
 
     def set_products(self, ids: list[str]) -> None:
         """Publish the catalog of tradable products for the terminal to browse.

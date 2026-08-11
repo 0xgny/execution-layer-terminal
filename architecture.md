@@ -48,7 +48,7 @@ rows in Sec. 2 describe intended end state, not current code.
 | `FeedProcess` | C++ | -- | Built | Launches + supervises a bundled feedhandler in packaged builds (inert when run from source) |
 | `MarketStore` | C++ | -- | Built | In-process last-value cache + bounded per-symbol price history + catalog |
 | Execution core (`cpp/`) | C++ | -- | Built | OMS state machine, risk gate + kill switch, paper matching |
-| `AlpacaClient` / `StockFeed` | C++ | -- | Built | libcurl REST client + background poller for Alpaca (IEX) stock quotes/bars |
+| `AlpacaClient` / `StockFeed` | C++ | -- | Built | libcurl REST client + background poller for Alpaca (IEX) stock quotes, sampled into a chart series |
 | `TradingEngine` | C++ | -- | Built | Threaded desk: reads quotes, runs OMS, republishes an immutable view |
 | Terminal GUI | C++ (ImGui/ImPlot) | -- | Built | Docked dashboard + live charts |
 | Analysis layer | Python | -- | Planned | Rolling metrics/ML -> signals |
@@ -60,15 +60,18 @@ rows in Sec. 2 describe intended end state, not current code.
    receives raw trade/quote messages.
 2. Each message is normalized into a neutral `Trade` / `Quote` dataclass
    (`feedhandler/schema.py`) -- same shape regardless of venue.
-3. Ticks are **buffered** and **flushed** on a timer (default 250 ms,
+3. Ticks are **buffered** and **flushed** on a timer (default 100 ms,
    `EL_FLUSH_INTERVAL`) or when the buffer fills (default 1000, `EL_MAX_BUFFER`),
-   to amortize IPC cost.
+   to amortize IPC cost. The timer is the floor on end-to-end tick latency, so
+   it is set as low as the amortization argument allows rather than as high.
 4. The **publisher** (`publisher.py`) serializes each buffered batch as one line
    of JSON and writes it to the terminal's feed socket. If the terminal isn't
    listening yet, ticks are dropped and the connection retried.
 5. The **FeedServer** (`feed_server.cpp`) decodes each line on its own thread and
    writes straight into the **MarketStore**: `on_quote` replaces the symbol's
-   last-value entry, `on_trade` pushes onto its bounded price history.
+   last-value entry, `on_trade` pushes onto its bounded price history. History
+   points carry the exchange timestamp, so the chart can plot against real
+   elapsed time rather than tick index.
 6. The **engine** reads `snapshot(symbols)` and `history(sym, n)` from the store.
    Both are mutex-guarded map lookups in the same process -- no I/O, no
    serialization, no round trip.
@@ -85,6 +88,14 @@ is being streamed without a restart:
 - The feedhandler publishes the product catalog (`{"m":"products"}`) and the set
   of symbols it is actually streaming (`{"m":"universe"}`) so the terminal can
   browse products and auto-populate its watch list at boot.
+- The terminal asks for chart backfill (`MarketStore::request_history`, returned
+  in the same poll reply); the feedhandler fetches recent 1-minute candles for
+  that product and sends them as `{"m":"history"}`, which the store merges in
+  *behind* whatever live tape it already holds. This rides the poll reply rather
+  than being pushed at subscribe time because only the terminal knows which
+  symbol is on screen -- the feed streams ~100 products and charts one, so
+  backfilling everything it streams would be ~100 REST requests for charts
+  nobody has open.
 
 ### The `Trade` / `Quote` schema
 
@@ -150,7 +161,12 @@ that produces signals and the history to compute them over.
 - **Stocks (Alpaca):** `AlpacaClient` is a libcurl REST client against Alpaca's
   free "Basic" plan (real IEX-venue real-time quotes + historical daily bars, no
   order routing). `StockFeed` polls it on its own background thread (HTTP is too
-  slow for the engine loop), refreshing each watched symbol at most every ~10 s.
+  slow for the engine loop), refreshing the whole watch list once a second in a
+  single multi-symbol request -- so the 200 req/min budget is spent at a flat 60,
+  independent of how many symbols are watched. Each poll also samples the mid
+  into a bounded per-symbol series, which is what the Price Chart plots for
+  stocks: the free plan has no live trade stream, so there is no trade tape to
+  chart the way crypto does.
   Stocks are off unless `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` are set; the
   OMS, risk manager, and matching engine are asset-agnostic and treat stocks and
   crypto identically.
